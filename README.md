@@ -304,7 +304,7 @@ curl -X POST http://localhost:8080/api/v1/webhooks/workflows/<webhook_token> \
 - 状态跟踪（外部系统）：`GET /api/v1/webhooks/workflows/<webhook_token>/executions/<data.id>`——仅凭 webhook token 即可轮询（仅本工作流、返回状态视图，不含输入/输出 payload）
 - 状态跟踪（平台内部）：`GET /api/v1/workflow-executions/<data.id>`（需用户 JWT，含节点级完整详情）
 
-## 典型端到端流程（本地演示）
+## 典型端到端流程
 
 1. 按「快速开始」启动依赖、后端、前端（可选启动 mock MCP / mock Model 服务器）。
 2. 注册第一个用户（自动 admin）并登录。
@@ -318,7 +318,7 @@ curl -X POST http://localhost:8080/api/v1/webhooks/workflows/<webhook_token> \
 
 ## API 端点
 
-> 各接口的用途、用法、入参与出参详见 [docs/api.md](docs/api.md)（含统一响应格式、错误码、DAG 定义结构与枚举速查）。
+> 各接口的用途、用法、入参与出参详见 [docs/api/api.md](docs/api/api.md)（含统一响应格式、错误码、DAG 定义结构与枚举速查）；对外提供的接口见 [docs/api/external-api.md](docs/api/api.md)。
 
 - POST /api/v1/auth/register - 用户注册 (首个注册用户自动成为 admin)
 - POST /api/v1/auth/login - 用户登录
