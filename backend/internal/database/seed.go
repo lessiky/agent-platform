@@ -32,6 +32,7 @@ func SeedPermissionsAndRoles(db *gorm.DB) error {
 		{Code: "skill:write", Name: "技能写", Resource: "skill", Action: "write"},
 		{Code: "user:manage", Name: "用户管理", Resource: "user", Action: "manage"},
 		{Code: "role:manage", Name: "角色管理", Resource: "role", Action: "manage"},
+		{Code: "platform:manage", Name: "平台管理", Resource: "platform", Action: "manage"},
 	}
 	for i := range permissions {
 		if err := db.Where(&model.Permission{Code: permissions[i].Code}).
@@ -48,7 +49,7 @@ func SeedPermissionsAndRoles(db *gorm.DB) error {
 
 	roles := []model.Role{
 		{Name: "admin", Description: "管理员 (含 MCP 工具审批权限)", Status: 1},
-		{Name: "operator", Description: "运营 (业务读写, 不含审批与用户/角色管理)", Status: 1},
+		{Name: "operator", Description: "运营 (业务读写, 不含审批/用户/角色/平台管理)", Status: 1},
 		{Name: "user", Description: "默认角色 (只读)", Status: 1},
 	}
 	for i := range roles {
@@ -67,7 +68,7 @@ func SeedPermissionsAndRoles(db *gorm.DB) error {
 	rolePermCodes := map[string][]string{}
 	for _, perm := range permissions {
 		rolePermCodes["admin"] = append(rolePermCodes["admin"], perm.Code)
-		if perm.Code != "mcp:approve" && perm.Code != "user:manage" && perm.Code != "role:manage" {
+		if perm.Code != "mcp:approve" && perm.Code != "user:manage" && perm.Code != "role:manage" && perm.Code != "platform:manage" {
 			rolePermCodes["operator"] = append(rolePermCodes["operator"], perm.Code)
 		}
 		switch perm.Code {
@@ -113,7 +114,7 @@ func SeedPermissionsAndRoles(db *gorm.DB) error {
 		log.Printf("RBAC seed: assigned default role 'user' to existing user %s", u.Username)
 	}
 
-	log.Println("RBAC seed completed (14 permissions, admin/operator/user roles, demo_user=admin)")
+	log.Println("RBAC seed completed (15 permissions, admin/operator/user roles, demo_user=admin)")
 	return nil
 }
 

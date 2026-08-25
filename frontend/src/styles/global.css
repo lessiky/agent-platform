@@ -55,3 +55,20 @@ body {
 .session-delete-btn:hover {
   color: #ff4d4f;
 }
+
+/* 会话列表项重命名按钮 (hover 显示, 位于删除按钮左侧) */
+.session-rename-btn {
+  position: absolute;
+  right: 28px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #8c8c8c;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.ant-list-item:hover .session-rename-btn {
+  opacity: 1;
+}
+.session-rename-btn:hover {
+  color: #1677ff;
+}

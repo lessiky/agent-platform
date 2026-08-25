@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Alert, App, Button, Card, Form, Input, Tabs } from 'antd';
 import { LockOutlined, MailOutlined, UserOutlined } from '@ant-design/icons';
 import { authApi } from '@/api/auth';
 import { getErrorMessage } from '@/api/client';
 import { useAuthStore } from '@/store/auth-store';
+import { usePlatformStore } from '@/store/platform-store';
+import { PlatformLogo } from '@/components/common/PlatformLogo';
 
 interface LoginForm {
   username: string;
@@ -21,10 +23,16 @@ export function LoginPage() {
   const navigate = useNavigate();
   const { message } = App.useApp();
   const setAuth = useAuthStore((s) => s.setAuth);
+  const { name, fetchPlatform } = usePlatformStore();
   const [submitting, setSubmitting] = useState(false);
   const [loginForm] = Form.useForm<LoginForm>();
   const [registerForm] = Form.useForm<RegisterForm>();
   const [error, setError] = useState<string | null>(null);
+
+  // 拉取平台名/图标 (登录页品牌展示)
+  useEffect(() => {
+    fetchPlatform();
+  }, [fetchPlatform]);
 
   const onLogin = async (values: LoginForm) => {
     setSubmitting(true);
@@ -63,7 +71,10 @@ export function LoginPage() {
   return (
     <Card style={{ width: 400, boxShadow: 'var(--shadow-md)' }}>
       <div style={{ textAlign: 'center', marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>Agent 管理平台</h2>
+        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
+          <PlatformLogo size={52} />
+        </div>
+        <h2 style={{ margin: 0, fontSize: 20 }}>{name}</h2>
         <p style={{ color: 'var(--color-text-secondary)' }}>登录后管理你的 Agent</p>
       </div>
       {error && (

@@ -21,11 +21,11 @@ import (
 // 解析 JSON -> 结构校验 + 上下文校验 (agent_id/mcp_server_id/tool 必须真实存在) ->
 // 失败携带错误信息重试一次 -> 返回校验通过的草稿 (不落库, 由用户在前端确认后保存)
 const (
-	aiGenMaxAttempts         = 2    // 首次 + 1 次带错误反馈的重试
-	aiGenMaxAgents           = 20   // 提示词中最多携带的 Agent 数
-	aiGenMaxMCPServers       = 20   // 提示词中最多携带的 MCP 服务器数
-	aiGenMaxToolsPerServer   = 30   // 单服务器最多携带的工具数
-	aiGenDescMaxRunes        = 2000 // 流程描述长度上限 (字)
+	aiGenMaxAttempts       = 2    // 首次 + 1 次带错误反馈的重试
+	aiGenMaxAgents         = 20   // 提示词中最多携带的 Agent 数
+	aiGenMaxMCPServers     = 20   // 提示词中最多携带的 MCP 服务器数
+	aiGenMaxToolsPerServer = 30   // 单服务器最多携带的工具数
+	aiGenDescMaxRunes      = 2000 // 流程描述长度上限 (字)
 )
 
 // AIGenerateWorkflowRequest AI 生成工作流请求
@@ -138,8 +138,8 @@ func (g *WorkflowAIGenerator) Generate(ctx context.Context, req AIGenerateWorkfl
 
 // aiGenServerEntry MCP 服务器目录条目 (提示词展示用, 保持有序)
 type aiGenServerEntry struct {
-	ID       string
-	Tools    []model.MCPTool
+	ID    string
+	Tools []model.MCPTool
 }
 
 // aiGenCatalog 平台能力目录 (提示词 + 上下文校验共用)

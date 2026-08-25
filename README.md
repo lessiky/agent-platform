@@ -14,11 +14,11 @@ AI Agent 统一管理平台：支持 Agent 创建与运行管理、模型路由�
 | 模型管理     | 模型模板 CRUD、连通性检测、配额、优先级路由            | 模型管理          | `model:read` / `model:write`                            |
 | 审核中心     | MCP 工具调用人工审核（通过 / 驳回 / 超时策略）        | 审核中心          | 查看 `mcp:read`，通过 / 驳回 `mcp:approve`                     |
 | 工作流      | DAG 编排、执行引擎、Cron 定时、Webhook 触发、执行追踪 | 工作流管理         | `workflow:read` / `workflow:write` / `workflow:execute` |
-| 系统管理     | 用户 / 角色 / 权限管理                      | 系统管理          | `user:manage` / `role:manage`                           |
+| 系统管理     | 用户 / 角色 / 权限管理, 平台设置 (平台名 / 图标)    | 系统管理          | `user:manage` / `role:manage` / `platform:manage`       |
 
 ## 模块状态
 
-- M1 基础框架: 认证 (JWT)、RBAC 权限 (真实查询 user_roles/role_permissions, 14 权限点 / admin·operator·user 角色 + 用户/角色管理 API 与 UI, 详见 docs/phase1/RBAC-implementation-summary.md)、统一响应/错误
+- M1 基础框架: 认证 (JWT)、RBAC 权限 (真实查询 user_roles/role_permissions, 15 权限点 / admin·operator·user 角色 + 用户/角色管理 API 与 UI, 详见 docs/phase1/RBAC-implementation-summary.md)、统一响应/错误
 - M2 Agent 管理: Agent CRUD (模型下拉选择, MCP 绑定 + 可用工具自动校验)、实例启停、版本回滚、API Key (外部调用入口 /invoke)、运行日志、调用统计、状态看板 + 前端页面 (详见 docs/phase1/M2-implementation-summary.md)
 - M2.5 Agent 对话与系统提示词: 多轮对话 (会话持久化, 最近 10 条上下文)、模型调用 (OpenAI 兼容, M4 路由故障转移 + 配额)、对话内工具调用 (白名单 + M4.5 审核门禁, 轮数可配)、执行元数据 (execution_id / tokens / 耗时) + 前端对话面板 (详见 docs/phase1/M2.5-implementation-summary.md)
 - M3 MCP 管理: MCP 注册、工具发现、凭证加密 (AES-256-GCM)、健康监控、Agent 绑定调用 + 前端页面 (详见 docs/phase1/M3-implementation-summary.md)
@@ -91,8 +91,8 @@ MOCK_MODEL_PORT=9101 MOCK_MODEL_API_KEY=mock-model-key-123 go run ./tools/mock-m
 
 | 角色         | 说明   | 权限                                                                            |
 | ---------- | ---- | ----------------------------------------------------------------------------- |
-| `admin`    | 管理员  | 全部 14 个权限点（含 `mcp:approve` / `user:manage` / `role:manage`）                   |
-| `operator` | 运营   | 业务读写（除 `mcp:approve` / `user:manage` / `role:manage` 外的 11 个）                 |
+| `admin`    | 管理员  | 全部 15 个权限点（含 `mcp:approve` / `user:manage` / `role:manage` / `platform:manage`） |
+| `operator` | 运营   | 业务读写（除 `mcp:approve` / `user:manage` / `role:manage` / `platform:manage` 外的 11 个） |
 | `user`     | 默认角色 | 只读（`agent:read` / `mcp:read` / `model:read` / `workflow:read` / `skill:read`） |
 
 - 用户被停用或删除后，其存量 JWT 立即失效。
@@ -260,7 +260,13 @@ MOCK_MODEL_PORT=9101 MOCK_MODEL_API_KEY=mock-model-key-123 go run ./tools/mock-m
 
 ### 10. 系统管理
 
-入口：系统管理 - 用户管理 / 角色管理（分别需 `user:manage` / `role:manage`，菜单对无权限用户隐藏）。
+入口：系统管理 - 平台设置 / 用户管理 / 角色管理（分别需 `platform:manage` / `user:manage` / `role:manage`，菜单对无权限用户隐藏）。
+
+**平台设置**
+
+- 平台名称：1-64 个字符，默认「Agent 管理平台」；保存后登录页、侧边导航与浏览器标签页标题即时更新。
+- 平台图标：PNG / JPG / SVG / WebP / GIF，大小 ≤ 1MB（以 base64 data URL 落库）；不设置时展示内置默认图标。
+- 变更写入审计日志（`action=platform.update`，含名称前后值与图标是否变更）。
 
 **用户管理**
 
@@ -270,7 +276,7 @@ MOCK_MODEL_PORT=9101 MOCK_MODEL_API_KEY=mock-model-key-123 go run ./tools/mock-m
 
 **角色管理**
 
-- 新建角色：名称 / 描述 / 按资源分组勾选权限点（14 个）。
+- 新建角色：名称 / 描述 / 按资源分组勾选权限点（15 个）。
 - 编辑权限：全量替换；`admin` 角色强制保留 `user:manage` / `role:manage` / `mcp:approve`（防止把自己锁在管理界面外）。
 - 删除：内置角色（admin / operator / user）不可删除；有用户绑定的角色不可删除。
 - 权限变更即时生效（30s 权限缓存由变更事件主动失效）；全部用户 / 角色操作写入审计日志。

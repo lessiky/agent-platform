@@ -23,6 +23,7 @@ import { SkillListPage } from '@/pages/skill/SkillListPage';
 import { SkillDetailPage } from '@/pages/skill/SkillDetailPage';
 import { UserListPage } from '@/pages/system/UserListPage';
 import { RoleListPage } from '@/pages/system/RoleListPage';
+import { PlatformSettingsPage } from '@/pages/system/PlatformSettingsPage';
 
 export const router = createBrowserRouter([
   {
@@ -78,6 +79,14 @@ export const router = createBrowserRouter([
         element: (
           <RequirePermission code="role:manage">
             <RoleListPage />
+          </RequirePermission>
+        ),
+      },
+      {
+        path: 'system/platform',
+        element: (
+          <RequirePermission code="platform:manage">
+            <PlatformSettingsPage />
           </RequirePermission>
         ),
       },

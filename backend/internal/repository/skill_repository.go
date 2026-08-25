@@ -163,6 +163,7 @@ func (r *skillRepository) CountAgents(ctx context.Context, skillIDs []string) (m
 	}
 	return result, nil
 }
+
 // SkillFileRepository 技能包文件仓储
 type SkillFileRepository interface {
 	ListMetaBySkill(ctx context.Context, skillID string) ([]SkillFileMeta, error)

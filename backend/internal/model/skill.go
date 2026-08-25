@@ -17,8 +17,8 @@ const (
 type Skill struct {
 	ID            string         `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
 	Name          string         `gorm:"type:varchar(64);not null" json:"name"` // 全局唯一 (部分唯一索引 uk_skills_name_alive, 见 database.go) // 全局唯一 (部分唯一索引见 database.go)
-	Version       int            `gorm:"not null;default:1" json:"version"`                 // 每次升级 +1
-	VersionSpec   string         `gorm:"type:varchar(32)" json:"version_spec"`              // 包内声明版本号 (semver)
+	Version       int            `gorm:"not null;default:1" json:"version"`     // 每次升级 +1
+	VersionSpec   string         `gorm:"type:varchar(32)" json:"version_spec"`  // 包内声明版本号 (semver)
 	Description   string         `gorm:"type:text" json:"description"`
 	Author        string         `gorm:"type:varchar(64)" json:"author"`
 	Tags          datatypes.JSON `gorm:"type:jsonb;default:'[]'" json:"tags"`

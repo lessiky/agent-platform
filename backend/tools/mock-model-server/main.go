@@ -16,9 +16,9 @@
 //
 // 对话行为 (M2.5):
 //
-//	- 请求含 role=tool 消息            -> 返回确认文本 (工具轮结束)
-//	- 最后一条用户消息含 CALL_TOOL:<name> 或 CALL_TOOL:<name>:<arg> -> 返回 tool_calls 请求调用 <name> (load_skill 时 arg 作为 skill_name)
-//	- 其他                             -> 固定应答
+//   - 请求含 role=tool 消息            -> 返回确认文本 (工具轮结束)
+//   - 最后一条用户消息含 CALL_TOOL:<name> 或 CALL_TOOL:<name>:<arg> -> 返回 tool_calls 请求调用 <name> (load_skill 时 arg 作为 skill_name)
+//   - 其他                             -> 固定应答
 package main
 
 import (

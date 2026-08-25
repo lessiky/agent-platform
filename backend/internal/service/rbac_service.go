@@ -51,8 +51,8 @@ type CreateRoleRequest struct {
 }
 
 type UpdateRoleRequest struct {
-	Description *string  `json:"description" binding:"omitempty,max=512"`
-	Status      *int8    `json:"status" binding:"omitempty,oneof=0 1"`
+	Description *string   `json:"description" binding:"omitempty,max=512"`
+	Status      *int8     `json:"status" binding:"omitempty,oneof=0 1"`
 	Permissions *[]string `json:"permissions"`
 }
 

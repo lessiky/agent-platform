@@ -16,6 +16,8 @@ type ChatSessionRepository interface {
 	Create(ctx context.Context, s *model.ChatSession) error
 	Get(ctx context.Context, id string) (*model.ChatSession, error)
 	ListByAgent(ctx context.Context, agentID string, page, pageSize int) ([]model.ChatSession, int64, error)
+	// UpdateTitle 修改会话标题 (手动重命名)
+	UpdateTitle(ctx context.Context, id, title string) error
 	TouchLastMessage(ctx context.Context, id string) error
 	DeleteByAgent(ctx context.Context, agentID string) error
 	// DeleteByAgentCascade 级联删除 Agent 全部会话及其消息 (M2.5)
@@ -70,6 +72,11 @@ func (r *chatSessionRepository) ListByAgent(ctx context.Context, agentID string,
 		Offset((page - 1) * pageSize).Limit(pageSize).
 		Find(&items).Error
 	return items, total, err
+}
+
+func (r *chatSessionRepository) UpdateTitle(ctx context.Context, id, title string) error {
+	return database.DB.WithContext(ctx).Model(&model.ChatSession{}).
+		Where("id = ?", id).Update("title", title).Error
 }
 
 func (r *chatSessionRepository) TouchLastMessage(ctx context.Context, id string) error {

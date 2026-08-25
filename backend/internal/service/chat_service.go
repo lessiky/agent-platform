@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	"agent-platform/internal/mcpclient"
@@ -21,10 +23,11 @@ import (
 )
 
 const (
-	chatHistoryLimit  = 10 // 送入模型的历史消息条数 (user/assistant)
-	chatLogKeep       = 5000
-	chatTitleMaxRunes = 32
-	defaultToolRounds = 5 // 工具调用轮数默认上限 (可被 agent 配置 max_tool_rounds 覆盖)
+	chatHistoryLimit         = 10 // 送入模型的历史消息条数 (user/assistant)
+	chatLogKeep              = 5000
+	chatTitleMaxRunes        = 32
+	chatSessionTitleMaxRunes = 128 // 手动重命名会话名上限 (与 DB varchar(128) 一致)
+	defaultToolRounds        = 5   // 工具调用轮数默认上限 (可被 agent 配置 max_tool_rounds 覆盖)
 )
 
 // ChatRequest 对话请求
@@ -78,14 +81,38 @@ type ChatResult struct {
 // ChatService Agent 对话服务 (M2.5, PRD 2.1.4)
 type ChatService interface {
 	Chat(ctx context.Context, agentID string, req ChatRequest, operatorID string) (*ChatResult, error)
+	// ChatStream 对话 (SSE 流式版, 2026-08-24): 返回事件通道 (turn_start/model_round/tool_start/tool_end/final/error),
+	// 执行链在后台运行并实时推送阶段事件; 客户端断开 (ctx 取消) 时执行链随之中止
+	ChatStream(ctx context.Context, agentID string, req ChatRequest, operatorID string) (<-chan ChatStreamEvent, error)
 	// Invoke API Key 外部调用 (2026-08-21 升级): 与 Chat 同链路并返回模型应答, 支持可选 session_id
 	Invoke(ctx context.Context, agentID string, req InvokeRequest) (*ChatResult, error)
+	// InvokeAsync API Key 外部异步调用 (/invoke 202): 创建执行任务并立即返回,
+	// 执行链 (模型+工具轮+落库) 在后台 goroutine 运行, 状态/阶段/结果经 GetExecution 查询
+	InvokeAsync(ctx context.Context, agentID string, req InvokeRequest) (*model.AgentExecution, error)
+	// GetExecution 查询执行任务状态 (限本 Agent)
+	GetExecution(ctx context.Context, agentID, executionID string) (*model.AgentExecution, error)
+	// CancelExecution 取消进行中的执行任务 (watchdog 卡死取消 / 外部取消端点共用), 返回任务是否在本进程内
+	CancelExecution(executionID string) bool
+	// CancelInvokeExecution 取消进行中的 /invoke 执行任务 (对外取消端点):
+	// running 且本进程持有取消句柄 → 取消执行上下文 (透传进行中的模型/MCP 调用) 并标记终态 cancelled;
+	// waiting_approval → 409 (任务在等人工审核, 经审核端点决策); running 但句柄不在本进程 → 409;
+	// 已终态 (success/failed/stalled/cancelled) → 幂等, 返回当前终态
+	// 返回 (任务操作后的 DB 实际状态, 本次调用是否触发了取消)
+	CancelInvokeExecution(ctx context.Context, agentID, executionID string) (*model.AgentExecution, bool, error)
+	// DeleteExecutionsByAgent 删除 Agent 下全部执行任务 (删除 Agent 级联)
+	DeleteExecutionsByAgent(ctx context.Context, agentID string) error
+	// ReconcileOrphanExecutions 启动时将上次进程遗留的进行中执行任务置为失败 (等待审核保留, 决策后可恢复)
+	ReconcileOrphanExecutions(ctx context.Context) error
+	// StallThreshold 返回无心跳卡死阈值 (watchdog 配置用)
+	StallThreshold() time.Duration
 	// ContinueAfterApproval 审核决策后恢复对话 (M4.5 联动, 由审批决策钩子调用)
 	ContinueAfterApproval(ctx context.Context, approval *model.ToolApproval)
 	// GetApprovalContinuation 查询审核决策后的模型续答 (ContinueAfterApproval 落库的 assistant 消息)
 	GetApprovalContinuation(ctx context.Context, approvalID string) (*model.ChatMessage, error)
 	ListSessions(ctx context.Context, agentID string, page, size int) ([]model.ChatSession, int64, error)
 	GetSession(ctx context.Context, agentID, sessionID string) (*model.ChatSession, []model.ChatMessage, error)
+	// RenameSession 修改会话名 (会话列表手动重命名)
+	RenameSession(ctx context.Context, agentID, sessionID, title string) (*model.ChatSession, error)
 	DeleteSession(ctx context.Context, agentID, sessionID string) error
 }
 
@@ -98,6 +125,14 @@ type chatService struct {
 	modelSvc ModelTemplateService
 	stats    repository.AgentCallStatRepository
 	skills   SkillService
+
+	executions     repository.AgentExecutionRepository // 执行任务 (/invoke 202 异步化)
+	modelChatTime  time.Duration                       // 模型单次调用超时 (执行预算计算)
+	mcpCallTime    time.Duration                       // MCP 单次工具调用超时 (执行预算计算)
+	stallThreshold time.Duration                       // 无心跳卡死阈值 (max 单步时长 + 余量)
+
+	execMu      sync.Mutex
+	execCancels map[string]context.CancelFunc // 本进程内执行任务取消句柄 (watchdog 卡死取消)
 }
 
 // NewChatService 创建对话服务
@@ -110,16 +145,35 @@ func NewChatService(
 	modelSvc ModelTemplateService,
 	stats repository.AgentCallStatRepository,
 	skills SkillService,
+	executions repository.AgentExecutionRepository,
+	modelChatTimeout, mcpCallTimeout time.Duration,
 ) ChatService {
+	if modelChatTimeout <= 0 {
+		modelChatTimeout = 120 * time.Second
+	}
+	if mcpCallTimeout <= 0 {
+		mcpCallTimeout = 5 * time.Second
+	}
+	// 卡死阈值: 单步 (一次模型调用或一次工具调用) 不可能超过两者取大, 再加 60s 余量
+	stall := modelChatTimeout
+	if mcpCallTimeout > stall {
+		stall = mcpCallTimeout
+	}
+	stall += 60 * time.Second
 	return &chatService{
-		agents:   agents,
-		sessions: sessions,
-		messages: messages,
-		logs:     logs,
-		mcpSvc:   mcpSvc,
-		modelSvc: modelSvc,
-		stats:    stats,
-		skills:   skills,
+		agents:         agents,
+		sessions:       sessions,
+		messages:       messages,
+		logs:           logs,
+		mcpSvc:         mcpSvc,
+		modelSvc:       modelSvc,
+		stats:          stats,
+		skills:         skills,
+		executions:     executions,
+		modelChatTime:  modelChatTimeout,
+		mcpCallTime:    mcpCallTimeout,
+		stallThreshold: stall,
+		execCancels:    make(map[string]context.CancelFunc),
 	}
 }
 
@@ -291,7 +345,59 @@ func (s *chatService) Chat(ctx context.Context, agentID string, req ChatRequest,
 		}
 	}
 
-	return s.runTurn(ctx, agent, &agentCfg, session, message, "chat", model.ApprovalSourceChat)
+	return s.runTurn(ctx, agent, &agentCfg, session, message, "chat", model.ApprovalSourceChat, nil)
+}
+
+// ChatStream 对话 (SSE 流式版, 2026-08-24):
+// 校验/会话逻辑与 Chat 相同; 执行链在 goroutine 中运行, 阶段事件经事件通道实时推送,
+// 最终推送 final (与同步端点 data 同构) 或 error; ctx (请求上下文) 取消时执行链中止
+func (s *chatService) ChatStream(ctx context.Context, agentID string, req ChatRequest, operatorID string) (<-chan ChatStreamEvent, error) {
+	message := strings.TrimSpace(req.Message)
+	if message == "" {
+		return nil, errors.NewValidationError("message cannot be empty")
+	}
+
+	agent, err := s.agents.GetByID(ctx, agentID)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, errors.ErrNotFound
+		}
+		return nil, errors.Wrap(err, "failed to get agent")
+	}
+	var agentCfg AgentConfig
+	_ = json.Unmarshal(agent.Config, &agentCfg)
+
+	var session *model.ChatSession
+	if req.SessionID != nil && strings.TrimSpace(*req.SessionID) != "" {
+		session, err = s.sessions.Get(ctx, strings.TrimSpace(*req.SessionID))
+		if err != nil {
+			return nil, err
+		}
+		if session.AgentID != agentID {
+			return nil, errors.NewValidationError("session does not belong to this agent")
+		}
+	} else {
+		session = &model.ChatSession{
+			AgentID:       agentID,
+			Title:         truncateTitle(message),
+			UserID:        strPtr(operatorID),
+			Status:        model.ChatSessionActive,
+			LastMessageAt: time.Now(),
+		}
+		if err := s.sessions.Create(ctx, session); err != nil {
+			return nil, errors.Wrap(err, "failed to create chat session")
+		}
+	}
+
+	sink := newChatEventSink()
+	tracker := &executionTracker{sink: sink}
+	go func() {
+		defer sink.close()
+		if _, err := s.runTurn(ctx, agent, &agentCfg, session, message, "chat", model.ApprovalSourceChat, tracker); err != nil {
+			tracker.failed(err)
+		}
+	}()
+	return sink.ch, nil
 }
 
 // Invoke API Key 外部调用 (/invoke, 2026-08-21 升级): 与 Chat 共用执行链路并返回模型应答;
@@ -337,13 +443,437 @@ func (s *chatService) Invoke(ctx context.Context, agentID string, req InvokeRequ
 		}
 	}
 
-	return s.runTurn(ctx, agent, &agentCfg, session, message, "api invoke", model.ApprovalSourceAPIInvoke)
+	return s.runTurn(ctx, agent, &agentCfg, session, message, "api invoke", model.ApprovalSourceAPIInvoke, nil)
+}
+
+// invokeBudget 计算一次执行任务的整体 deadline 预算 (单轮上限 = 模型调用 + 单次工具调用, 按轮数*2 放大并留底)
+func (s *chatService) invokeBudget(maxRounds int) time.Duration {
+	if maxRounds <= 0 {
+		maxRounds = defaultToolRounds
+	}
+	return (s.modelChatTime+s.mcpCallTime)*time.Duration(maxRounds)*2 + 2*time.Minute
+}
+
+// InvokeAsync API Key 外部异步调用 (202 语义, 2026-08-24):
+// 校验 Agent、解析/新建会话、落库执行任务 (running) 后立即返回;
+// 后台 goroutine 运行 runTurn 执行链, 终态 (success/failed/waiting_approval) 由 runAsyncExecution 回填
+func (s *chatService) InvokeAsync(ctx context.Context, agentID string, req InvokeRequest) (*model.AgentExecution, error) {
+	message := strings.TrimSpace(req.Message)
+	if message == "" {
+		return nil, errors.NewValidationError("message cannot be empty")
+	}
+
+	agent, err := s.agents.GetByID(ctx, agentID)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, errors.ErrNotFound
+		}
+		return nil, errors.Wrap(err, "failed to get agent")
+	}
+	var agentCfg AgentConfig
+	_ = json.Unmarshal(agent.Config, &agentCfg)
+
+	var session *model.ChatSession
+	if req.SessionID != nil && strings.TrimSpace(*req.SessionID) != "" {
+		session, err = s.sessions.Get(ctx, strings.TrimSpace(*req.SessionID))
+		if err != nil {
+			return nil, err
+		}
+		if session.AgentID != agentID {
+			return nil, errors.NewValidationError("session does not belong to this agent")
+		}
+	} else {
+		session = &model.ChatSession{
+			AgentID:       agentID,
+			Title:         truncateTitle(message),
+			Status:        model.ChatSessionActive,
+			LastMessageAt: time.Now(),
+		}
+		if err := s.sessions.Create(ctx, session); err != nil {
+			return nil, errors.Wrap(err, "failed to create invoke session")
+		}
+	}
+
+	maxRounds := defaultToolRounds
+	if agentCfg.MaxToolRounds > 0 {
+		maxRounds = agentCfg.MaxToolRounds
+	}
+	now := time.Now()
+	execution := &model.AgentExecution{
+		AgentID:        agentID,
+		Source:         model.ApprovalSourceAPIInvoke,
+		SessionID:      &session.ID,
+		Status:         model.AgentExecutionStatusRunning,
+		Stage:          "queued",
+		Deadline:       now.Add(s.invokeBudget(maxRounds)),
+		LastActivityAt: now,
+		StartedAt:      now,
+	}
+	if err := s.executions.Create(ctx, execution); err != nil {
+		return nil, errors.Wrap(err, "failed to create execution record")
+	}
+
+	// 执行上下文: deadline = 任务整体预算; cancel 注册到进程内表, 供 watchdog 卡死时取消
+	deadlineCtx, deadlineCancel := context.WithDeadline(context.Background(), execution.Deadline)
+	runCtx, cancel := context.WithCancel(deadlineCtx)
+	s.registerExecCancel(execution.ID, func() {
+		cancel()
+		deadlineCancel()
+	})
+
+	go s.runAsyncExecution(runCtx, agent, &agentCfg, session, message, execution)
+	return execution, nil
+}
+
+// runAsyncExecution 后台运行异步执行任务: 复用 runTurn 执行链, 完成时回填执行任务终态
+func (s *chatService) runAsyncExecution(ctx context.Context, agent *model.Agent, agentCfg *AgentConfig, session *model.ChatSession, message string, execution *model.AgentExecution) {
+	defer s.unregisterExecCancel(execution.ID)
+	defer func() {
+		if r := recover(); r != nil {
+			s.finishExecution(execution.ID, model.AgentExecutionStatusFailed, fmt.Sprintf("execution panic: %v", r), nil)
+		}
+	}()
+
+	tracker := &executionTracker{id: execution.ID, repo: s.executions}
+	result, err := s.runTurn(ctx, agent, agentCfg, session, message, "api invoke", model.ApprovalSourceAPIInvoke, tracker)
+	if err != nil {
+		switch {
+		case stderrors.Is(ctx.Err(), context.DeadlineExceeded):
+			// 整体 deadline 耗尽 (context 自动取消; watchdog 可能已标记终态, Finish 有状态守卫不覆盖)
+			s.finishExecution(execution.ID, model.AgentExecutionStatusFailed, "执行超时: 整体 deadline 耗尽", nil)
+		case stderrors.Is(ctx.Err(), context.Canceled):
+			// 外部取消端点/watchdog 卡死取消 (终态已先行写入: cancelled/stalled, Finish 状态守卫不覆盖)
+		default:
+			s.finishExecution(execution.ID, model.AgentExecutionStatusFailed, err.Error(), nil)
+		}
+		return
+	}
+
+	resultJSON, _ := json.Marshal(result)
+	if len(result.PendingApprovals) > 0 {
+		// 待人工审核: 本轮已落库, 审核决策钩子 (ContinueAfterApproval) 完成后回填终态
+		ids := make([]string, 0, len(result.PendingApprovals))
+		for i := range result.PendingApprovals {
+			ids = append(ids, result.PendingApprovals[i].ApprovalID)
+		}
+		pendingJSON, _ := json.Marshal(ids)
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if mErr := s.executions.MarkWaitingApproval(bgCtx, execution.ID, pendingJSON, resultJSON,
+			"等待审核: "+strings.Join(ids, ",")); mErr != nil {
+			log.Printf("chat: mark execution waiting approval failed id=%s: %v", execution.ID, mErr)
+		}
+		return
+	}
+	s.finishExecution(execution.ID, model.AgentExecutionStatusSuccess, "", resultJSON)
+}
+
+// finishExecution 回填执行任务终态 (独立 ctx: 执行上下文已取消也不受影响; 状态守卫保证不覆盖已终态行)
+func (s *chatService) finishExecution(executionID, status, errMsg string, result datatypes.JSON) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.executions.Finish(ctx, executionID, status, errMsg, result); err != nil {
+		log.Printf("chat: finish execution failed id=%s status=%s: %v", executionID, status, err)
+	}
+}
+
+// approvalResultPayload 审核决策后执行任务终态的 result 结构:
+// 审核上下文字段 + 内嵌续答轮 ChatResult (字段提升), 与直接成功路径的 result 结构对齐
+// (session_id / total_tokens / latency_ms / mcp_calls 等);
+// pre_review_mcp_calls 为命中审核门禁轮 (审核前) 的工具调用明细, 含对应 pending 项
+type approvalResultPayload struct {
+	ApprovalID        string `json:"approval_id"`
+	ApprovalStatus    string `json:"approval_status"`
+	ChatResult
+	PreReviewMCPCalls []MCPChatCall `json:"pre_review_mcp_calls,omitempty"`
+}
+
+// completeExecutionsByApproval 审核决策后回填关联等待审核执行任务的终态:
+// 通过 → success; 驳回/超时 → failed; result 均存模型续答 (续答轮 ChatResult + 审核字段)
+func (s *chatService) completeExecutionsByApproval(ctx context.Context, approval *model.ToolApproval, chatResult ChatResult) {
+	status := model.AgentExecutionStatusSuccess
+	if approval.Status != model.ApprovalStatusApproved {
+		status = model.AgentExecutionStatusFailed
+	}
+	errMsg := ""
+	if status == model.AgentExecutionStatusFailed {
+		switch approval.Status {
+		case model.ApprovalStatusRejected:
+			errMsg = "工具调用未执行: 审核驳回"
+		case model.ApprovalStatusExpired:
+			errMsg = "工具调用未执行: 审核超时"
+		default:
+			errMsg = "工具调用未执行 (审核状态: " + approval.Status + ")"
+		}
+	}
+	// 审核前工具调用: 读取任务等待审核时保存的中间结果 (命中门禁轮的工具调用明细, 含 pending 项)
+	var preReview []MCPChatCall
+	if exec, gErr := s.executions.GetByApprovalID(ctx, approval.ID); gErr == nil {
+		var intermediate struct {
+			MCPCalls []MCPChatCall `json:"mcp_calls"`
+		}
+		if json.Unmarshal(exec.Result, &intermediate) == nil {
+			preReview = intermediate.MCPCalls
+		}
+	} else if gErr != errors.ErrNotFound {
+		log.Printf("chat: get execution by approval failed approval=%s: %v", approval.ID, gErr)
+	}
+	payload := approvalResultPayload{
+		ApprovalID:        approval.ID,
+		ApprovalStatus:    approval.Status,
+		ChatResult:        chatResult,
+		PreReviewMCPCalls: preReview,
+	}
+	result, _ := json.Marshal(payload)
+	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.executions.FinishByApproval(bgCtx, approval.ID, status, errMsg, datatypes.JSON(result)); err != nil {
+		log.Printf("chat: finish executions by approval failed approval=%s: %v", approval.ID, err)
+	}
+}
+
+// failExecutionsByApproval 续答链路自身失败时回填关联等待审核执行任务的终态 (failed)
+func (s *chatService) failExecutionsByApproval(ctx context.Context, approval *model.ToolApproval, reason string) {
+	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.executions.FinishByApproval(bgCtx, approval.ID, model.AgentExecutionStatusFailed, "审核续答失败: "+reason, nil); err != nil {
+		log.Printf("chat: fail executions by approval failed approval=%s: %v", approval.ID, err)
+	}
+}
+
+func (s *chatService) registerExecCancel(executionID string, cancel context.CancelFunc) {
+	s.execMu.Lock()
+	s.execCancels[executionID] = cancel
+	s.execMu.Unlock()
+}
+
+func (s *chatService) unregisterExecCancel(executionID string) {
+	s.execMu.Lock()
+	delete(s.execCancels, executionID)
+	s.execMu.Unlock()
+}
+
+// CancelExecution 取消进行中的执行任务 (watchdog), 返回任务是否在本进程内
+func (s *chatService) CancelExecution(executionID string) bool {
+	s.execMu.Lock()
+	cancel, ok := s.execCancels[executionID]
+	s.execMu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel()
+	return true
+}
+
+// CancelInvokeExecution 取消进行中的 /invoke 执行任务 (对外取消端点, 外部方主动放弃):
+// 复用进程内取消句柄 (与 watchdog 同一机制), 取消后执行上下文透传至进行中的模型/MCP 调用
+func (s *chatService) CancelInvokeExecution(ctx context.Context, agentID, executionID string) (*model.AgentExecution, bool, error) {
+	exec, err := s.GetExecution(ctx, agentID, executionID)
+	if err != nil {
+		return nil, false, err
+	}
+
+	triggered := false
+	switch exec.Status {
+	case model.AgentExecutionStatusWaitingApproval:
+		return exec, false, &errors.AppError{Code: "waiting_approval",
+			Message: "执行正在等待人工审核, 无法取消; 请经审核端点 (GET /agents/:id/invoke/approvals/:approvalId) 或平台内决策", HTTPCode: 409}
+	case model.AgentExecutionStatusRunning:
+		if !s.CancelExecution(executionID) {
+			return exec, false, &errors.AppError{Code: "not_in_process",
+				Message: "执行任务不在当前进程内, 无法取消 (服务可能已重启, 任务已被对账置为失败)", HTTPCode: 409}
+		}
+		triggered = true
+		// 标记终态 cancelled (独立 ctx; Finish 状态守卫保证不覆盖已终态行, 与 watchdog 的 stalled 标记同模式)
+		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if fErr := s.executions.Finish(bgCtx, executionID, model.AgentExecutionStatusCancelled, "执行已取消: 外部调用方主动放弃任务", nil); fErr != nil {
+			log.Printf("chat: mark execution cancelled failed id=%s: %v", executionID, fErr)
+		}
+	}
+
+	// 回读 DB 实际状态返回 (与任务自然完成的竞态: 行已终态时 Finish 不生效, 返回自然终态)
+	if refreshed, gErr := s.GetExecution(ctx, agentID, executionID); gErr == nil {
+		exec = refreshed
+	}
+	return exec, triggered, nil
+}
+
+// GetExecution 查询执行任务状态 (限本 Agent)
+func (s *chatService) GetExecution(ctx context.Context, agentID, executionID string) (*model.AgentExecution, error) {
+	if strings.TrimSpace(executionID) == "" {
+		return nil, errors.ErrNotFound
+	}
+	return s.executions.Get(ctx, agentID, executionID)
+}
+
+// DeleteExecutionsByAgent 删除 Agent 下全部执行任务 (删除 Agent 级联)
+func (s *chatService) DeleteExecutionsByAgent(ctx context.Context, agentID string) error {
+	return s.executions.DeleteByAgent(ctx, agentID)
+}
+
+// ReconcileOrphanExecutions 启动对账: 上次进程遗留的 running 执行任务置为 failed (等待审核保留)
+func (s *chatService) ReconcileOrphanExecutions(ctx context.Context) error {
+	n, err := s.executions.ReconcileOrphans(ctx)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Printf("chat: reconciled %d orphan executions to failed", n)
+	}
+	return nil
+}
+
+// StallThreshold 返回无心跳卡死阈值
+func (s *chatService) StallThreshold() time.Duration {
+	return s.stallThreshold
+}
+
+// executionTracker 执行任务进度追踪器: 将阶段/心跳写入 agent_executions (尽力而为, 不阻断主链);
+// 同步调用方 (Chat / 工作流节点 / 审核续答) 传 nil, 不产生执行任务
+type executionTracker struct {
+	id   string
+	repo repository.AgentExecutionRepository
+	sink *chatEventSink // 可选: SSE 事件推送 (非流式调用方为 nil)
+}
+
+// stage 更新当前阶段 + 心跳 (nil 安全)
+func (t *executionTracker) stage(stage string) {
+	if t == nil || t.id == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := t.repo.SetStage(ctx, t.id, stage); err != nil {
+		log.Printf("chat: update execution stage failed id=%s: %v", t.id, err)
+	}
+}
+
+// turnStart 对话开始 (SSE)
+func (t *executionTracker) turnStart(executionID, sessionID string) {
+	if t == nil || t.sink == nil {
+		return
+	}
+	t.sink.publish(ChatStreamEvent{Type: "turn_start", Data: map[string]string{
+		"execution_id": executionID,
+		"session_id":   sessionID,
+	}})
+}
+
+// modelRound 模型调用开始 (SSE); forced = 工具轮耗尽后的强制终答轮
+func (t *executionTracker) modelRound(round int, forced bool) {
+	if t == nil || t.sink == nil {
+		return
+	}
+	data := map[string]interface{}{"round": round}
+	if forced {
+		data["forced"] = true
+	}
+	t.sink.publish(ChatStreamEvent{Type: "model_round", Data: data})
+}
+
+// toolStart 工具调用开始 (SSE)
+func (t *executionTracker) toolStart(round int, mcpName, toolName string) {
+	if t == nil || t.sink == nil {
+		return
+	}
+	t.sink.publish(ChatStreamEvent{Type: "tool_start", Data: map[string]interface{}{
+		"round":     round,
+		"mcp_name":  mcpName,
+		"tool_name": toolName,
+	}})
+}
+
+// toolEnd 工具调用结束 (SSE); call 为 executeToolCall 追加的明细 (load_skill 无明细, 由调用方构造)
+func (t *executionTracker) toolEnd(round int, call MCPChatCall) {
+	if t == nil || t.sink == nil {
+		return
+	}
+	t.sink.publish(ChatStreamEvent{Type: "tool_end", Data: map[string]interface{}{
+		"round":      round,
+		"mcp_name":   call.MCPName,
+		"tool_name":  call.ToolName,
+		"status":     call.Status,
+		"latency_ms": call.LatencyMs,
+		"detail":     call.Detail,
+	}})
+}
+
+// done 对话完成 (SSE): data 与同步端点 data 同构 (ChatResult)
+func (t *executionTracker) done(result *ChatResult) {
+	if t == nil || t.sink == nil || result == nil {
+		return
+	}
+	t.sink.publish(ChatStreamEvent{Type: "final", Data: result})
+}
+
+// failed 对话失败 (SSE)
+func (t *executionTracker) failed(err error) {
+	if t == nil || t.sink == nil || err == nil {
+		return
+	}
+	t.sink.publish(ChatStreamEvent{Type: "error", Data: map[string]string{"message": err.Error()}})
+}
+
+// toolStage 工具调用阶段标识 (tool:<mcp名>/<工具名>; 内置工具无 MCP 前缀)
+func toolStage(toolIndex map[string]toolRef, name string) string {
+	if ref, ok := toolIndex[name]; ok && ref.MCPName != "" {
+		return "tool:" + ref.MCPName + "/" + name
+	}
+	return "tool:" + name
+}
+
+// toolMCPName 工具所属 MCP 名 (内置工具返回空)
+func toolMCPName(toolIndex map[string]toolRef, name string) string {
+	if ref, ok := toolIndex[name]; ok {
+		return ref.MCPName
+	}
+	return ""
+}
+
+// ChatStreamEvent 对话流式事件 (SSE, /chat/stream): 按执行链推进顺序推送
+// type: turn_start (开始) / model_round (模型调用开始) / tool_start (工具调用开始) /
+//
+//	tool_end (工具调用结束) / final (最终结果, data 与同步端点 data 同构) / error (失败)
+type ChatStreamEvent struct {
+	Type string      `json:"type"`
+	Data interface{} `json:"data"`
+}
+
+// chatEventSink 对话事件推送通道 (SSE 处理器消费; 带缓冲, 推送不阻塞执行链)
+type chatEventSink struct {
+	ch   chan ChatStreamEvent
+	once sync.Once
+}
+
+func newChatEventSink() *chatEventSink {
+	return &chatEventSink{ch: make(chan ChatStreamEvent, 32)}
+}
+
+// publish 推送事件 (永不阻塞: 缓冲满时丢弃并告警)
+func (s *chatEventSink) publish(evt ChatStreamEvent) {
+	if s == nil {
+		return
+	}
+	select {
+	case s.ch <- evt:
+	default:
+		log.Printf("chat: event sink overflow, dropping event %s", evt.Type)
+	}
+}
+
+// close 关闭通道 (幂等)
+func (s *chatEventSink) close() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() { close(s.ch) })
 }
 
 // runTurn 执行一轮对话 (Chat 与 API Key /invoke 共用):
 // 组装上下文 -> 模型调用 (路由/故障转移/配额) -> (工具调用轮) -> 落库 (有会话时) -> 调用统计
 // session 为 nil 表示 stateless (外部调用未指定会话): 不带历史上下文, 不写会话消息
-func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg *AgentConfig, session *model.ChatSession, message, source, approvalSource string) (*ChatResult, error) {
+func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg *AgentConfig, session *model.ChatSession, message, source, approvalSource string, tracker *executionTracker) (*ChatResult, error) {
 	agentID := agent.ID
 	sessionID := ""
 	if session != nil {
@@ -354,6 +884,9 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	start := time.Now()
 	s.execLog(agentID, model.LogLevelInfo, fmt.Sprintf("%s execution start execution_id=%s session=%s user_message_len=%d",
 		source, executionID, sessionID, len([]rune(message))))
+	tracker.turnStart(executionID, sessionID)
+	tracker.stage("model:round=1")
+	tracker.modelRound(1, false)
 
 	// 技能注入 (M9): 加载 Agent 关联启用技能 (metadata: 目录 + load_skill; full: 全文)
 	st := s.prepareSkillTurn(ctx, agentID, agentCfg, source, executionID)
@@ -434,7 +967,7 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	if agentCfg.MaxToolRounds > 0 {
 		maxRounds = agentCfg.MaxToolRounds
 	}
-	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, sessionID, source, approvalSource, &pending, &mcpCalls, executionID, st)
+	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, sessionID, source, approvalSource, &pending, &mcpCalls, executionID, st, tracker)
 	if roundErr != nil {
 		if strings.TrimSpace(outcome.Content) == "" {
 			if session != nil {
@@ -480,7 +1013,7 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	s.execLog(agentID, model.LogLevelInfo, fmt.Sprintf("%s execution done execution_id=%s reply_len=%d tokens=%d latency=%dms pending=%d",
 		source, executionID, len([]rune(finalReply)), totalTokens, time.Since(start).Milliseconds(), len(pending)))
 
-	return &ChatResult{
+	result := &ChatResult{
 		SessionID:        sessionID,
 		MessageID:        assistantID,
 		Reply:            finalReply,
@@ -492,17 +1025,20 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 		MCPCalls:         mcpCalls,
 		SkillCalls:       skillCalls,
 		PendingApprovals: pending,
-	}, nil
+	}
+	tracker.done(result)
+	return result, nil
 }
 
-// executeToolCall 执行模型请求的单个工具调用 (走 M4.5 审核门禁), 返回回传给模型的 tool 消息内容
-func (s *chatService) executeToolCall(ctx context.Context, agentID, sessionID, source, approvalSource string, toolIndex map[string]toolRef, tc modelclient.ChatToolCall, pending *[]runtime.PendingApproval, calls *[]MCPChatCall, executionID string) string {
+// executeToolCall 执行模型请求的单个工具调用 (走 M4.5 审核门禁), 返回回传给模型的 tool 消息内容;
+// 第二返回值表示该工具调用已转入人工审核 (未执行, 调用方应暂停本轮并等待审核决策后续跑)
+func (s *chatService) executeToolCall(ctx context.Context, agentID, sessionID, source, approvalSource string, toolIndex map[string]toolRef, tc modelclient.ChatToolCall, pending *[]runtime.PendingApproval, calls *[]MCPChatCall, executionID string) (string, bool) {
 	name := tc.Function.Name
 	ref, ok := toolIndex[name]
 	if !ok {
 		*calls = append(*calls, MCPChatCall{ToolName: name, Status: "skipped", Detail: "not in allowed tools"})
 		s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("%s mcp tool=%s status=skipped reason=not_allowed", source, name))
-		return fmt.Sprintf("Tool %s is not in this agent's allowed tool set, cannot execute", name)
+		return fmt.Sprintf("Tool %s is not in this agent's allowed tool set, cannot execute", name), false
 	}
 
 	var args map[string]interface{}
@@ -510,7 +1046,7 @@ func (s *chatService) executeToolCall(ctx context.Context, agentID, sessionID, s
 		if uErr := json.Unmarshal([]byte(tc.Function.Arguments), &args); uErr != nil {
 			*calls = append(*calls, MCPChatCall{MCPName: ref.MCPName, ToolName: name, Status: "error", Detail: "invalid arguments"})
 			s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("%s mcp tool=%s mcp=%s status=error reason=invalid_arguments", source, name, ref.MCPName))
-			return fmt.Sprintf("Tool %s arguments invalid: %v", name, uErr)
+			return fmt.Sprintf("Tool %s arguments invalid: %v", name, uErr), false
 		}
 	}
 
@@ -525,22 +1061,22 @@ func (s *chatService) executeToolCall(ctx context.Context, agentID, sessionID, s
 	if err != nil {
 		*calls = append(*calls, MCPChatCall{MCPName: ref.MCPName, ToolName: name, Status: "error", Detail: err.Error(), LatencyMs: latency})
 		s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("%s mcp tool=%s mcp=%s status=error latency=%dms error=%s", source, name, ref.MCPName, latency, err))
-		return fmt.Sprintf("Tool %s call failed: %v", name, err)
+		return fmt.Sprintf("Tool %s call failed: %v", name, err), false
 	}
 	if outcome.PendingApproval != nil {
 		*pending = append(*pending, runtime.PendingApproval{ApprovalID: outcome.PendingApproval.ID, MCPName: ref.MCPName, ToolName: name})
 		*calls = append(*calls, MCPChatCall{MCPName: ref.MCPName, ToolName: name, Status: "pending", Detail: "approval_id=" + outcome.PendingApproval.ID})
-		s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("%s mcp tool=%s mcp=%s status=pending approval_id=%s (等待人工审核, 本次不执行)", source, name, ref.MCPName, outcome.PendingApproval.ID))
-		return fmt.Sprintf("Tool %s requires human approval (approval_id=%s), not executed this time", name, outcome.PendingApproval.ID)
+		s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("%s mcp tool=%s mcp=%s status=pending approval_id=%s (等待人工审核, 本轮暂停, 后续工具不执行)", source, name, ref.MCPName, outcome.PendingApproval.ID))
+		return fmt.Sprintf("Tool %s requires human approval (approval_id=%s), not executed this time", name, outcome.PendingApproval.ID), true
 	}
 	if outcome.Result.IsError {
 		*calls = append(*calls, MCPChatCall{MCPName: ref.MCPName, ToolName: name, Status: "error", Detail: "mcp returned error", LatencyMs: latency})
 		s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("%s mcp tool=%s mcp=%s status=error latency=%dms (mcp error)", source, name, ref.MCPName, latency))
-		return fmt.Sprintf("Tool %s returned an error from MCP server: %s", name, toolResultContent(outcome.Result))
+		return fmt.Sprintf("Tool %s returned an error from MCP server: %s", name, toolResultContent(outcome.Result)), false
 	}
 	*calls = append(*calls, MCPChatCall{MCPName: ref.MCPName, ToolName: name, Status: "ok", LatencyMs: latency})
 	s.execLog(agentID, model.LogLevelInfo, fmt.Sprintf("%s mcp tool=%s mcp=%s status=ok latency=%dms", source, name, ref.MCPName, latency))
-	return toolResultContent(outcome.Result)
+	return toolResultContent(outcome.Result), false
 }
 
 // executeSkillLoad 执行 load_skill 内置工具 (M9-2.2): 不走人工审核, 同一执行内重复加载返回确认;
@@ -681,8 +1217,10 @@ func truncateRune(s string, max int) string {
 	return string(r[:max]) + "..."
 }
 
-// runToolRounds 工具调用轮循环: 模型持续发起工具调用时执行并回传结果, 直到模型停止
-// 或达到轮数上限 (超限后不再下发工具, 强制模型给出最终答复)。返回新增 token 数;
+// runToolRounds 工具调用轮循环: 模型持续发起工具调用时执行并回传结果, 直到模型停止、
+// 达到轮数上限 (超限后不再下发工具, 强制模型给出最终答复) 或遇到需人工审核的工具
+// (审核门禁: 立即暂停本轮, 不执行同批后续工具调用, 不再发起后续模型轮, 由
+// ContinueAfterApproval 在审核决策后续跑)。返回新增 token 数;
 // 模型调用失败时返回错误 (outcome 保留最后有效文本, 由调用方决定是否降级)。
 func (s *chatService) runToolRounds(
 	ctx context.Context,
@@ -700,6 +1238,7 @@ func (s *chatService) runToolRounds(
 	mcpCalls *[]MCPChatCall,
 	executionID string,
 	st *skillTurn,
+	tracker *executionTracker,
 ) (int, error) {
 	var totalTokens int
 	for round := 1; len(outcome.ToolCalls) > 0; round++ {
@@ -708,16 +1247,38 @@ func (s *chatService) runToolRounds(
 			*messages = append(*messages, modelclient.ChatMessage{
 				Role: model.ChatRoleAssistant, Content: outcome.Content, ToolCalls: outcome.ToolCalls,
 			})
+			haltedForApproval := false
 			for _, tc := range outcome.ToolCalls {
+				tracker.stage(toolStage(toolIndex, tc.Function.Name))
+				tracker.toolStart(round, toolMCPName(toolIndex, tc.Function.Name), tc.Function.Name)
 				var toolMsg string
+				var approvalPending bool
+				toolStartAt := time.Now()
 				if tc.Function.Name == loadSkillToolName && st.loadTool() {
 					toolMsg = s.executeSkillLoad(agentID, source, executionID, toolIndex, tc, st)
 				} else {
-					toolMsg = s.executeToolCall(ctx, agentID, sessionID, source, approvalSource, toolIndex, tc, pending, mcpCalls, executionID)
+					toolMsg, approvalPending = s.executeToolCall(ctx, agentID, sessionID, source, approvalSource, toolIndex, tc, pending, mcpCalls, executionID)
+				}
+				// 工具结束事件: executeToolCall 已追加明细 (取末条); load_skill 无明细, 构造简单事件
+				if n := len(*mcpCalls); n > 0 {
+					tracker.toolEnd(round, (*mcpCalls)[n-1])
+				} else {
+					tracker.toolEnd(round, MCPChatCall{ToolName: tc.Function.Name, Status: "ok", LatencyMs: time.Since(toolStartAt).Milliseconds()})
 				}
 				*messages = append(*messages, modelclient.ChatMessage{
 					Role: model.ChatRoleTool, ToolCallID: tc.ID, Name: tc.Function.Name, Content: toolMsg,
 				})
+				if approvalPending {
+					// 审核门禁: 本轮到此暂停 — 同批后续工具调用不再执行, 也不再做后续模型轮;
+					// 审核决策后由 ContinueAfterApproval 携带执行结果续跑对话
+					approvalID := (*pending)[len(*pending)-1].ApprovalID
+					s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("%s turn halted for approval execution_id=%s round=%d tool=%s approval_id=%s (后续工具调用未执行)", source, executionID, round, tc.Function.Name, approvalID))
+					haltedForApproval = true
+					break
+				}
+			}
+			if haltedForApproval {
+				break
 			}
 		} else {
 			s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("%s tool rounds exhausted execution_id=%s max_rounds=%d, forcing final answer", source, executionID, maxRounds))
@@ -726,6 +1287,11 @@ func (s *chatService) runToolRounds(
 		roundTools := tools
 		if forced {
 			roundTools = nil
+			tracker.stage(fmt.Sprintf("model:final (tool rounds exhausted at %d)", maxRounds))
+			tracker.modelRound(round+1, true)
+		} else {
+			tracker.stage(fmt.Sprintf("model:round=%d", round+1))
+			tracker.modelRound(round+1, false)
 		}
 		outcome2, err := s.modelSvc.RouteAndChat(ctx, agentID, *messages, roundTools, gen)
 		if err != nil {
@@ -753,6 +1319,7 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 		(approval.Source != model.ApprovalSourceChat && approval.Source != model.ApprovalSourceAPIInvoke) {
 		return
 	}
+	start := time.Now()
 	sourceLabel := "chat"
 	if approval.Source == model.ApprovalSourceAPIInvoke {
 		sourceLabel = "api invoke"
@@ -760,6 +1327,7 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	session, err := s.sessions.Get(ctx, *approval.ChatSessionID)
 	if err != nil {
 		log.Printf("chat: continuation load session failed approval=%s: %v", approval.ID, err)
+		s.failExecutionsByApproval(ctx, approval, "续答会话加载失败")
 		return
 	}
 	agentID := session.AgentID
@@ -769,6 +1337,7 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	agent, err := s.agents.GetByID(ctx, agentID)
 	if err != nil {
 		log.Printf("chat: continuation load agent failed approval=%s agent=%s: %v", approval.ID, agentID, err)
+		s.failExecutionsByApproval(ctx, approval, "续答 Agent 加载失败")
 		return
 	}
 	var agentCfg AgentConfig
@@ -778,6 +1347,7 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	history, err := s.messages.ListBySession(ctx, session.ID, chatHistoryLimit)
 	if err != nil {
 		log.Printf("chat: continuation load history failed approval=%s: %v", approval.ID, err)
+		s.failExecutionsByApproval(ctx, approval, "续答历史加载失败")
 		return
 	}
 	skillSection := ""
@@ -805,15 +1375,16 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 		if len(approval.Result) > 0 {
 			resultText = strings.TrimSpace(string(approval.Result))
 		}
-		notice = fmt.Sprintf("[系统通知] 你之前请求的工具 %s (审核单 %s) 已由管理员批准并执行, 执行结果:\n%s\n请基于执行结果向用户给出后续答复。", approval.ToolName, approval.ID, resultText)
+		notice = fmt.Sprintf("[系统通知] 本会话上一轮请求的工具 %s (审核单 %s) 已批准并执行, 执行结果:\n%s\n说明: 上一轮对话在该工具等待人工审核时已暂停, 其后的步骤均未执行, 该工具本身不要再次调用。请继续完成原任务的其余未完成步骤 (如有), 并基于执行结果向用户给出完整答复。", approval.ToolName, approval.ID, resultText)
 	} else {
-		notice = fmt.Sprintf("[系统通知] 你之前请求的工具 %s (审核单 %s) 未获执行 (状态: %s)。请告知用户该操作未执行, 并给出替代建议。", approval.ToolName, approval.ID, approval.Status)
+		notice = fmt.Sprintf("[系统通知] 本会话上一轮请求的工具 %s (审核单 %s) 未获执行 (状态: %s)。上一轮对话在该工具等待人工审核时已暂停, 其后的步骤均未执行。请告知用户该操作未执行, 并给出替代建议。", approval.ToolName, approval.ID, approval.Status)
 	}
 	messages = append(messages, modelclient.ChatMessage{Role: model.ChatRoleUser, Content: notice})
 
 	toolDefs, err := s.mcpSvc.ListAgentTools(ctx, agentID)
 	if err != nil {
 		log.Printf("chat: continuation load tools failed approval=%s: %v", approval.ID, err)
+		s.failExecutionsByApproval(ctx, approval, "续答工具加载失败")
 		return
 	}
 	tools := make([]modelclient.ChatToolDef, 0, len(toolDefs))
@@ -852,6 +1423,7 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	}
 	if err := s.messages.Append(ctx, displayLines); err != nil {
 		log.Printf("chat: continuation persist approval lines failed approval=%s: %v", approval.ID, err)
+		s.failExecutionsByApproval(ctx, approval, "续答审核行落库失败")
 		return
 	}
 	_ = s.sessions.TouchLastMessage(ctx, session.ID)
@@ -859,6 +1431,7 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	outcome, err := s.modelSvc.RouteAndChat(ctx, agentID, messages, tools, gen)
 	if err != nil {
 		log.Printf("chat: continuation model call failed approval=%s: %v", approval.ID, err)
+		s.failExecutionsByApproval(ctx, approval, "续答模型调用失败: "+err.Error())
 		return
 	}
 	var pending []runtime.PendingApproval
@@ -867,8 +1440,16 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	if agentCfg.MaxToolRounds > 0 {
 		maxRounds = agentCfg.MaxToolRounds
 	}
-	if _, err := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, session.ID, sourceLabel, approval.Source, &pending, &mcpCalls, executionID, st); err != nil {
-		log.Printf("chat: continuation tool rounds failed approval=%s: %v", approval.ID, err)
+	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, session.ID, sourceLabel, approval.Source, &pending, &mcpCalls, executionID, st, nil)
+	if roundErr != nil {
+		log.Printf("chat: continuation tool rounds failed approval=%s: %v", approval.ID, roundErr)
+	}
+
+	if len(pending) > 0 {
+		// 续答轮命中新的人工审核门禁: 不回填终态, 任务重回等待审核;
+		// 审核决策后由 ContinueAfterApproval 携决策结果再次续跑
+		s.markWaitingForNewApprovals(ctx, approval, session, agentID, &pending, &mcpCalls, outcome, st, start, extraTokens)
+		return
 	}
 
 	reply := strings.TrimSpace(outcome.Content)
@@ -885,18 +1466,123 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 		meta["skill_calls"] = st.calls
 	}
 	metaJSON, _ := json.Marshal(meta)
-	if err := s.messages.Append(ctx, []*model.ChatMessage{{
+	assistant := &model.ChatMessage{
 		SessionID:     session.ID,
 		Role:          model.ChatRoleAssistant,
 		Content:       reply,
 		ExecutionID:   strPtr(executionID),
 		ExecutionMeta: datatypes.JSON(metaJSON),
-	}}); err != nil {
+	}
+	if err := s.messages.Append(ctx, []*model.ChatMessage{assistant}); err != nil {
 		log.Printf("chat: continuation persist reply failed approval=%s: %v", approval.ID, err)
+		s.failExecutionsByApproval(ctx, approval, "续答落库失败")
 		return
 	}
 	_ = s.sessions.TouchLastMessage(ctx, session.ID)
-	s.execLog(agentID, model.LogLevelInfo, fmt.Sprintf("chat continuation done approval_id=%s status=%s session=%s reply_len=%d", approval.ID, approval.Status, session.ID, len([]rune(reply))))
+	latencyMs := time.Since(start).Milliseconds()
+	totalTokens := outcome.TotalTokens + extraTokens
+	s.execLog(agentID, model.LogLevelInfo, fmt.Sprintf("chat continuation done approval_id=%s status=%s session=%s reply_len=%d tokens=%d latency=%dms", approval.ID, approval.Status, session.ID, len([]rune(reply)), totalTokens, latencyMs))
+	chatResult := ChatResult{
+		SessionID:   session.ID,
+		MessageID:   assistant.ID,
+		Reply:       reply,
+		ExecutionID: executionID,
+		Model:       outcome.Model,
+		ModelName:   outcome.TemplateName,
+		TotalTokens: totalTokens,
+		LatencyMs:   latencyMs,
+		MCPCalls:    mcpCalls,
+	}
+	if st != nil && len(st.calls) > 0 {
+		chatResult.SkillCalls = st.calls
+	}
+	s.completeExecutionsByApproval(ctx, approval, chatResult)
+}
+
+// markWaitingForNewApprovals 审核续答轮命中新的人工审核门禁时, 将执行任务重回等待审核状态:
+// 落库续答轮中间结果 (与上一中间结果合并工具调用明细, 保留完整审核前过程),
+// 并累积审核单列表 (保留前几轮产生的审核单, 终态视图可查全程审核信息)
+func (s *chatService) markWaitingForNewApprovals(ctx context.Context, approval *model.ToolApproval, session *model.ChatSession, agentID string, pending *[]runtime.PendingApproval, mcpCalls *[]MCPChatCall, outcome *ChatOutcome, st *skillTurn, start time.Time, extraTokens int) {
+	exec, err := s.executions.GetByApprovalID(ctx, approval.ID)
+	if err != nil {
+		// 任务已终态或不存在 (如外部已放弃): 续答已落库, 无需重回等待
+		log.Printf("chat: lookup execution for re-waiting failed approval=%s: %v", approval.ID, err)
+		return
+	}
+	executionID := "appr-" + approval.ID
+	// 合并上一中间结果的工具调用明细 (前几轮审核前调用), 保留完整调用过程
+	var mergedCalls []MCPChatCall
+	if len(exec.Result) > 0 {
+		var intermediate struct {
+			MCPCalls []MCPChatCall `json:"mcp_calls"`
+		}
+		if json.Unmarshal(exec.Result, &intermediate) == nil {
+			mergedCalls = append(mergedCalls, intermediate.MCPCalls...)
+		}
+	}
+	mergedCalls = append(mergedCalls, *mcpCalls...)
+	// 累积审核单列表
+	mergedIDs := make([]string, 0, len(exec.PendingApprovals)+len(*pending))
+	seen := make(map[string]bool)
+	if len(exec.PendingApprovals) > 0 {
+		var existing []string
+		if json.Unmarshal(exec.PendingApprovals, &existing) == nil {
+			for _, id := range existing {
+				if !seen[id] {
+					seen[id] = true
+					mergedIDs = append(mergedIDs, id)
+				}
+			}
+		}
+	}
+	ids := make([]string, 0, len(*pending))
+	toolNames := make([]string, 0, len(*pending))
+	for i := range *pending {
+		id := (*pending)[i].ApprovalID
+		ids = append(ids, id)
+		toolNames = append(toolNames, (*pending)[i].ToolName)
+		if !seen[id] {
+			seen[id] = true
+			mergedIDs = append(mergedIDs, id)
+		}
+	}
+
+	// 中间应答落库 (与首轮等待审核应答格式一致)
+	reply := fmt.Sprintf("工具 %s 已提交人工审核, 审核通过后将继续执行。", strings.Join(toolNames, "、"))
+	assistant := &model.ChatMessage{
+		SessionID:   session.ID,
+		Role:        model.ChatRoleAssistant,
+		Content:     reply,
+		ExecutionID: strPtr(executionID),
+	}
+	if err := s.messages.Append(ctx, []*model.ChatMessage{assistant}); err != nil {
+		log.Printf("chat: persist re-waiting reply failed approval=%s: %v", approval.ID, err)
+		return
+	}
+	_ = s.sessions.TouchLastMessage(ctx, session.ID)
+
+	intermediate := ChatResult{
+		SessionID:   session.ID,
+		MessageID:   assistant.ID,
+		Reply:       reply,
+		ExecutionID: executionID,
+		Model:       outcome.Model,
+		ModelName:   outcome.TemplateName,
+		TotalTokens: outcome.TotalTokens + extraTokens,
+		LatencyMs:   time.Since(start).Milliseconds(),
+		MCPCalls:    mergedCalls,
+	}
+	if st != nil && len(st.calls) > 0 {
+		intermediate.SkillCalls = st.calls
+	}
+	resultJSON, _ := json.Marshal(intermediate)
+	pendingJSON, _ := json.Marshal(mergedIDs)
+	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if mErr := s.executions.MarkWaitingApproval(bgCtx, exec.ID, pendingJSON, resultJSON, "等待审核: "+strings.Join(ids, ",")); mErr != nil {
+		log.Printf("chat: mark execution re-waiting approval failed id=%s: %v", exec.ID, mErr)
+	}
+	s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("api invoke turn re-waiting approval execution_id=%s approval_ids=%s (续答轮命中新审核门禁)", exec.ID, strings.Join(ids, ",")))
 }
 
 // GetApprovalContinuation 查询审核决策后的模型续答 (execution_id 固定为 appr-<approvalID> 的 assistant 消息);
@@ -933,7 +1619,9 @@ func (s *chatService) persistChatTurn(ctx context.Context, session *model.ChatSe
 	metaJSON, _ := json.Marshal(meta)
 
 	msgs := make([]*model.ChatMessage, 0, 3+len(calls))
-	msgs = append(msgs, &model.ChatMessage{SessionID: session.ID, Role: model.ChatRoleUser, Content: userMsg})
+	// 用户消息时间戳取轮开始时刻 (而非落库时刻), 避免长轮结束时落库导致
+	// 会话内消息时序倒挂 (如审核续答消息早于本轮用户问题显示)
+	msgs = append(msgs, &model.ChatMessage{SessionID: session.ID, Role: model.ChatRoleUser, Content: userMsg, CreatedAt: start})
 	for i := range calls {
 		c := calls[i]
 		line := fmt.Sprintf("tool %s/%s status=%s", c.MCPName, c.ToolName, c.Status)
@@ -995,6 +1683,29 @@ func (s *chatService) DeleteSession(ctx context.Context, agentID, sessionID stri
 		return errors.ErrNotFound
 	}
 	return s.sessions.DeleteCascade(ctx, sessionID)
+}
+
+// RenameSession 修改会话名: 校验会话归属本 Agent, 标题非空且不超过上限
+func (s *chatService) RenameSession(ctx context.Context, agentID, sessionID, title string) (*model.ChatSession, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return nil, errors.NewValidationError("会话名不能为空")
+	}
+	if len([]rune(title)) > chatSessionTitleMaxRunes {
+		return nil, errors.NewValidationError(fmt.Sprintf("会话名长度不能超过 %d 个字符", chatSessionTitleMaxRunes))
+	}
+	session, err := s.sessions.Get(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session.AgentID != agentID {
+		return nil, errors.ErrNotFound
+	}
+	if err := s.sessions.UpdateTitle(ctx, sessionID, title); err != nil {
+		return nil, err
+	}
+	session.Title = title
+	return session, nil
 }
 
 // truncateTitle 会话标题: 首条用户消息截断

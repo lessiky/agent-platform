@@ -20,7 +20,7 @@
 | 方式 | 适用接口 | 请求头 |
 | ---- | -------- | ------ |
 | JWT（用户登录态） | 绝大多数 `/api/v1/**` 接口 | `Authorization: Bearer <token>`，token 来自 `POST /auth/login` |
-| Agent API Key | `POST /agents/:id/invoke`（外部系统调用 Agent） | `Authorization: Bearer akp_<64位hex>` |
+| Agent API Key | `POST /agents/:id/invoke`、`GET /agents/:id/invoke/executions/:executionId`、`POST /agents/:id/invoke/executions/:executionId/cancel`、`GET /agents/:id/invoke/approvals/:approvalId`（外部系统调用 Agent 及其执行任务查询/取消） | `Authorization: Bearer akp_<64位hex>` |
 | Webhook Token | `POST /webhooks/workflows/:token`（公开端点） | 无请求头，token 在 URL 路径中 |
 
 - JWT 过期默认 24h（`JWT_EXPIRE_HOUR`）。用户被停用/删除后，其存量 JWT 立即失效。
@@ -71,7 +71,7 @@
 
 接口所需权限点（RBAC）如下，角色与权限对应关系见「模块操作说明」：
 
-`agent:read` `agent:write` `mcp:read` `mcp:write` `mcp:approve` `model:read` `model:write` `workflow:read` `workflow:write` `workflow:execute` `skill:read` `skill:write` `user:manage` `role:manage`
+`agent:read` `agent:write` `mcp:read` `mcp:write` `mcp:approve` `model:read` `model:write` `workflow:read` `workflow:write` `workflow:execute` `skill:read` `skill:write` `user:manage` `role:manage` `platform:manage`
 
 ---
 
@@ -540,26 +540,45 @@
 | `message` | string | 是 | ≤8192 | 用户提示词 |
 | `session_id` | string | 否 | 该 Agent 下已存在的会话 | 指定则复用会话（多轮上下文）；不传则自动新建（外部会话，响应中返回，可续用） |
 
-- **出参**：`200`，`data` 为 `InvokeAgentResult`：
+- **出参**：`202 accepted`，`data` 为 `InvokeAgentResult`（异步执行任务）：
 
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
 | `agent_id` | string | Agent ID |
 | `key_prefix` | string | 使用的 Key 前缀 |
-| `reply` | string | 模型应答文本 |
-| `model` / `model_name` / `model_detail` | string | 实际使用的模型（故障转移后可能非首选） |
-| `model_ok` | bool | 模型调用是否成功 |
-| `mcp_details` | string[] | 工具调用日志行 |
-| `pending_approvals` | array | 待审核请求：`{approval_id, mcp_name, tool_name}`（对应工具**未执行**） |
-| `session_id` | string | 会话 ID（未指定时自动创建并返回，可下一轮复用） |
-| `message_id` | string | 落库消息 ID |
-| `tokens` | int | 该轮累计 token |
-| `latency_ms` | int | 耗时 |
+| `status` | string | `running`（任务已受理，执行中） |
+| `execution_id` | string | 执行任务 ID；状态/阶段/结果经 [4.21 外部调用执行任务状态查询](#421) 轮询 |
 
-- **特殊状态**：存在待审核工具调用时返回 `202 pending_approval`（同结构），对应工具**未执行**；外部系统凭同一 API Key 轮询 [4.21 外部调用待审核结果查询](#421) 获取终态、工具执行结果与模型续答。
-- **错误**：`401` Key 无效/过期/已吊销；`404` Agent 不存在。
+- **异步语义（2026-08-24）**：执行链（模型 + 工具轮 + 审核门禁）在平台后台运行，接口立即返回 202 + `execution_id`；状态 `running`/`waiting_approval`/`success`/`failed`/`stalled`/`cancelled`、当前阶段 `stage`、进度心跳 `last_activity_at` 均可查询（外部方无需长挂连接即可区分「执行中」与「卡死」）；外部方亦可经 [4.23 取消外部调用执行任务](#423) 主动放弃任务。
+- **降级同步路径**（无可用模型时）：返回 `200`，`data` 额外含 `reply` / `model_ok`（`false`）/ `mcp_details` / `tokens` / `latency_ms`（旧结构，行为不变）。
+- **特殊状态**：执行中出现需人工审核的工具调用时，执行任务状态转为 `waiting_approval`（`result.pending_approvals` 携带待审核请求，对应工具**未执行**）；外部系统凭同一 API Key 轮询 [4.22 外部调用待审核结果查询](#422) 获取终态、工具执行结果与模型续答（审核决策后平台自动回填执行任务终态）。
+- **错误**：`401` Key 无效/过期/已吊销；`404` Agent 不存在；`409` 实例未运行。
 
-### 4.21 外部调用待审核结果查询（API Key 认证）
+### 4.21 外部调用执行任务状态查询（API Key 认证）
+
+- **用途**：`/invoke` 返回 `202` 后，外部系统凭同一 API Key 轮询异步执行任务的状态/进度/结果，无需平台登录态。
+- **接口**：`GET /api/v1/agents/:id/invoke/executions/:executionId`
+- **认证**：`Authorization: Bearer akp_<key>`
+- **路径参数**：`id` = Agent ID（须为 Key 归属的 Agent）；`executionId` = `/invoke` `202` 响应的 `execution_id`
+- **权限边界**：Key 只能查询**本 Agent** 的执行任务；任务不存在、ID 非 UUID 或属于其他 Agent 时一律 `404`（不泄露存在性）。
+- **出参**：`200`，`data` 为 `AgentExecution`：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `id` / `agent_id` / `source` / `session_id` | string | 执行任务 ID / 归属 / 来源（`api_invoke`）/ 会话 ID |
+| `status` | string | `running` 执行中 / `waiting_approval` 等待人工审核 / `success` 成功 / `failed` 失败 / `stalled` 卡死 / `cancelled` 已取消（外部方主动放弃） |
+| `stage` | string | 当前阶段：`queued` / `model:round=N` / `tool:<mcp名>/<工具名>` / `model:final (...)` / `等待审核: ...` |
+| `pending_approvals` | string[] \| null | 本次执行产生的审核请求 ID 数组（进入 `waiting_approval` 时回填） |
+| `result` | object \| null | 执行结果（`success` 时为 `ChatResult`：`reply`/`session_id`/`mcp_calls` 等；进入 `waiting_approval` 时先存中间应答；审核决策后回填续答轮 `ChatResult` + `approval_id`/`approval_status`） |
+| `error` | string \| null | 失败/卡死原因 |
+| `deadline` | string | 整体 deadline（按工具轮数与单次模型/工具超时推导的预算） |
+| `last_activity_at` | string | 最近一次进度心跳（每次阶段推进刷新） |
+| `started_at` / `finished_at` | string | 开始 / 结束时间 |
+
+- **终态判定**：`status ∈ {success, failed, stalled, cancelled}` 即终态。`stalled` = 平台 watchdog 判定卡死（running 任务超过「max(单次模型调用超时, 单次工具调用超时) + 60s」无进度心跳），任务已被主动取消，`error` 中 `stage=` 为卡死阶段。`cancelled` = 外部方经取消端点主动放弃任务（与 watchdog 复用同一套进程内取消机制）。
+- **错误**：`401` Key 无效/不属于该 Agent/已吊销/已过期；`404` 执行任务不存在或不属于该 Agent。
+- **对接文档**：字段与轮询建议详见 `docs/api/external-api.md`「2. 获取执行任务状态」。
+### 4.22 外部调用待审核结果查询（API Key 认证）
 
 - **用途**：`/invoke` 返回 `202`（存在待审核工具调用）后，外部系统凭同一 API Key 轮询审核请求的终态与工具执行结果，无需平台登录态。
 - **接口**：`GET /api/v1/agents/:id/invoke/approvals/:approvalId`
@@ -609,7 +628,21 @@
 }
 ```
 
-### 4.22 对话
+### 4.23 取消外部调用执行任务（API Key 认证）
+
+- **用途**：外部调用方主动放弃进行中的 `/invoke` 执行任务（业务侧超时、用户改变主意等）；平台取消该任务的执行上下文（透传至进行中的模型/MCP 调用），任务写入终态 `cancelled`，外部方无需继续轮询。
+- **接口**：`POST /api/v1/agents/:id/invoke/executions/:executionId/cancel`
+- **认证**：`Authorization: Bearer akp_<key>`
+- **路径参数**：`id` = Agent ID（须为 Key 归属的 Agent）；`executionId` = `/invoke` `202` 响应的 `execution_id`；无请求体。
+- **取消语义**：
+  - `running` 且任务在当前进程执行：取消立即生效，`cancelled=true`、`status=cancelled`，进行中的模型/MCP 调用随上下文中断；
+  - 已是终态（`success`/`failed`/`stalled`/`cancelled`）：幂等，`cancelled=false` + 当前终态；
+  - `waiting_approval`（等人工审核，无可中断的执行上下文）或任务不在当前进程（服务重启后）：`409`。
+- **出参**：`200`，`data`：`{execution_id, cancelled, status}`。
+- **错误**：`401` Key 无效/不属于该 Agent/已吊销/已过期；`400` `execution_id` 非 UUID；`404` 执行任务不存在或不属于该 Agent；`409` 任务 `waiting_approval` 或不在当前进程。
+- **对接文档**：取消语义与 watchdog 关系详见 `docs/api/external-api.md`「3. 取消执行任务」。
+
+### 4.24 对话
 
 - **用途**：用户在平台内与 Agent 对话。执行链路：系统提示词 + 最近 10 条历史 + 当前消息 → 模型（M4 路由故障转移 + 配额）→ 可选工具调用轮（至多 `max_tool_rounds` 轮）→ 应答。
 - **接口**：`POST /api/v1/agents/:id/chat`
@@ -636,9 +669,20 @@
 | `skill_calls` | array | 技能加载明细（M9）：`{name, version, mode, chars, latency_ms, status}` |
 | `pending_approvals` | array | 待审核工具：`{approval_id, mcp_name, tool_name}` |
 
+- **流式接口（SSE）**：`POST /api/v1/agents/:id/chat/stream`，权限 `agent:write`，请求体同上（`ChatRequest`）。响应为 `text/event-stream`，连接保持至执行结束，期间实时推送执行阶段事件（长耗时工具调用也可区分"执行中"）；每 15 秒发送一次 keepalive 注释帧（`: keepalive`）防止代理断连；客户端可主动断开（断开不影响服务端执行与结果落库）。
+
+  | event | data | 说明 |
+  | ---- | ---- | ---- |
+  | `turn_start` | `{execution_id, session_id}` | 执行开始 |
+  | `model_round` | `{round, forced?}` | 第 N 轮模型调用开始；`forced=true` 表示工具轮次用尽, 生成最终答复 |
+  | `tool_start` | `{round, mcp_name, tool_name}` | 开始调用工具 |
+  | `tool_end` | `{round, mcp_name, tool_name, status, latency_ms, detail?}` | 工具调用结束, `status` 为 ok/error/pending/skipped |
+  | `final` | `ChatResult`（与同步接口 `data` 同构） | 执行完成, 推送后服务端关闭连接 |
+  | `error` | `{message}` | 执行失败, 推送后服务端关闭连接 |
+
 - **说明**：调用需审核工具时不立即执行，生成审核请求（`source=chat`），`reply` 照常返回；审批通过后工具结果自动回填（不重跑模型轮）。
 
-### 4.23 会话列表
+### 4.25 会话列表
 
 - **接口**：`GET /api/v1/agents/:id/sessions`
 - **权限**：`agent:read`
@@ -646,7 +690,7 @@
 - **出参**：`200`，分页 `items` 为 `ChatSession[]`：`{id, agent_id, title, user_id, status, last_message_at, created_at, updated_at}`（`title` 取首条消息截断）。
 - **说明**：仅返回当前登录用户自己的会话（会话按用户隔离，访问他人会话返回 404）。
 
-### 4.24 会话详情（含消息历史）
+### 4.26 会话详情（含消息历史）
 
 - **接口**：`GET /api/v1/agents/:id/sessions/:sid`
 - **权限**：`agent:read`
@@ -654,11 +698,18 @@
 
 `ChatMessage` 字段：`{id, session_id, role(user/assistant/tool), content, execution_id, execution_meta(JSON), created_at}`；`execution_meta` 含 `execution_id`/`model_name`/`total_tokens`/`latency_ms`/`mcp_calls`/`skill_calls`/`pending_approvals`。
 
-### 4.25 删除会话
+### 4.27 删除会话
 
 - **接口**：`DELETE /api/v1/agents/:id/sessions/:sid`
 - **权限**：`agent:write`
 - **出参**：`200`，`data`：`{ "deleted": true }`
+
+### 4.28 修改会话名
+
+- **接口**：`PUT /api/v1/agents/:id/sessions/:sid`
+- **权限**：`agent:write`
+- **入参**（body）：`{ "title": "新会话名" }`（非空，≤ 128 字符，首尾空白去除）
+- **出参**：`200`，`data` 为更新后的 `ChatSession`；会话不属于该 Agent 时 `404`
 ---
 
 ## 5. 技能管理
@@ -1496,6 +1547,45 @@
 | `$execution.id` | 当前执行 ID |
 
 路径支持点号与数组下标（如 `$nodes.n1.reply`、`$inputs.items[0].name`）；整串引用保留原始类型，嵌入引用做文本格式化（如 `"hello $inputs.name"`）。
+
+---
+
+## 10. 平台设置 Platform
+
+### 10.1 获取平台设置
+
+- **用途**：获取平台名与平台图标（登录页 / 侧边导航 / 浏览器标签页展示）。
+- **接口**：`GET /api/v1/platform/settings`
+- **认证**：公开端点（无需 JWT, 品牌信息非敏感）
+- **入参**：无
+- **出参**：`200`，`data` 为 `PlatformInfo`：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `name` | string | 平台名（默认 `Agent 管理平台`） |
+| `icon` | string | 平台图标（base64 data URL: `data:image/png|jpeg|svg+xml|webp|gif;base64,...`）；空串 = 使用内置默认图标 |
+| `updated_at` | string | 最近更新时间 `YYYY-MM-DD HH:mm:ss`（从未更新时省略） |
+
+```json
+{
+  "code": "success", "message": "ok",
+  "data": { "name": "Agent 管理平台", "icon": "data:image/png;base64,iVBORw0KGgo=", "updated_at": "2026-08-24 10:00:00" }
+}
+```
+
+### 10.2 更新平台设置
+
+- **接口**：`PUT /api/v1/platform/settings`
+- **权限**：`platform:manage`（内置 admin 角色）
+- **入参**（JSON body，`UpdatePlatformRequest`）：
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+| ---- | ---- | ---- | ---- | ---- |
+| `name` | string | 是 | 1-64 个字符 | 平台名（首尾空白自动去除） |
+| `icon` | string \| null | 否 | base64 data URL, 原图 ≤ 1MB | `null` = 不修改；空串 = 清除自定义图标；其余须为 PNG / JPG / SVG / WebP / GIF 的 data URL |
+
+- **出参**：`200`，`data` 为更新后的 `PlatformInfo`。
+- 变更写入审计日志（`action=platform.update`, `resource=platform`, detail 含名称前后值与图标是否变更）。
 
 ---
 

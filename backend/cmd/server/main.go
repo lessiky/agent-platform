@@ -16,6 +16,7 @@ import (
 	"agent-platform/internal/api/mcp"
 	"agent-platform/internal/api/model"
 	"agent-platform/internal/api/overview"
+	"agent-platform/internal/api/platform"
 	"agent-platform/internal/api/rbac"
 	"agent-platform/internal/api/skill"
 	"agent-platform/internal/api/workflow"
@@ -149,7 +150,13 @@ func main() {
 		modelService,
 		repository.NewAgentCallStatRepository(),
 		skillService,
+		repository.NewAgentExecutionRepository(),
+		cfg.Model.ChatTimeout,
+		cfg.MCP.CheckTimeout,
 	)
+	// 5.715 Agent 执行任务 watchdog: /invoke 异步任务区分 "执行中" 与 "卡死" (心跳/deadline/等待审核兜底)
+	executionWatchdog := service.NewExecutionWatchdog(chatService, repository.NewAgentExecutionRepository(), chatService.StallThreshold(), service.ExecutionWatchdogScanInterval)
+	executionWatchdog.Start()
 
 	// 5.71 初始化 Agent 服务 (依赖对话链路: API Key /invoke 复用对话执行链返回模型应答)
 	agentService := service.NewAgentService(
@@ -167,6 +174,7 @@ func main() {
 		repository.NewChatSessionRepository(),
 		chatService,
 		repository.NewToolApprovalRepository(),
+		modelService,
 	)
 
 	// 服务启动时, 对账上次进程遗留的活动实例
@@ -218,6 +226,10 @@ func main() {
 	workflowService.SetSchedulerRefresher(workflowScheduler)
 	// 启动对账: 上次进程遗留的运行中执行置为失败 (审核挂起保留, 决策后可恢复)
 	workflowEngine.ReconcileOnStartup(context.Background())
+	// 对话执行任务对账: 遗留 running 任务置为失败 (等待审核保留, 决策后可恢复)
+	if err := chatService.ReconcileOrphanExecutions(context.Background()); err != nil {
+		log.Printf("Failed to reconcile orphan executions: %v", err)
+	}
 	workflowScheduler.Start()
 	// 6. 初始化路由
 	approvalHandler := mcp.NewApprovalHandler(approvalService)
@@ -226,6 +238,11 @@ func main() {
 	workflowHandler := workflow.NewHandler(workflowService, workflowAIGenerator)
 	skillHandler := skill.NewHandler(skillService)
 	overviewHandler := overview.NewHandler(service.NewOverviewService(repository.NewOverviewRepository()))
+	// 5.8 初始化平台设置域: 平台名/图标 (登录页与侧边导航展示)
+	platformHandler := platform.NewHandler(service.NewPlatformService(
+		repository.NewPlatformSettingsRepository(),
+		repository.NewAuditLogRepository(),
+	))
 	// 5.9 初始化 RBAC 管理域 (M1 遗留落地): 用户/角色/权限管理 + /auth/me
 	rbacService := service.NewRBACService(
 		repository.NewUserRepository(),
@@ -233,7 +250,7 @@ func main() {
 		repository.NewAuditLogRepository(),
 	)
 	rbacHandler := rbac.NewHandler(rbacService)
-	router := setupRouter(cfg, agent.NewHandler(agentService, chatService), mcp.NewHandler(mcpService, approvalService), model.NewHandler(modelService), approvalHandler, workflowHandler, skillHandler, rbacHandler, overviewHandler)
+	router := setupRouter(cfg, agent.NewHandler(agentService, chatService), mcp.NewHandler(mcpService, approvalService), model.NewHandler(modelService), approvalHandler, workflowHandler, skillHandler, rbacHandler, overviewHandler, platformHandler)
 
 	// 7. 启动服务 (支持优雅退出)
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -251,11 +268,12 @@ func main() {
 	sig := <-quit
 	log.Printf("Received signal %v, shutting down...", sig)
 
-	// 先停止 MCP/模型健康检查、审核超时扫描与所有 Agent 实例, 再关闭 HTTP 服务
+	// 先停止 MCP/模型健康检查、审核超时扫描、执行任务 watchdog 与所有 Agent 实例, 再关闭 HTTP 服务
 	workflowScheduler.Stop()
 	mcpHealthChecker.Stop()
 	modelHealthChecker.Stop()
 	approvalTimeoutChecker.Stop()
+	executionWatchdog.Stop()
 	agentRuntime.Shutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -267,7 +285,7 @@ func main() {
 	logger.Close()
 }
 
-func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mcp.Handler, modelHandler *model.Handler, approvalHandler *mcp.ApprovalHandler, workflowHandler *workflow.Handler, skillHandler *skill.Handler, rbacHandler *rbac.Handler, overviewHandler *overview.Handler) *gin.Engine {
+func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mcp.Handler, modelHandler *model.Handler, approvalHandler *mcp.ApprovalHandler, workflowHandler *workflow.Handler, skillHandler *skill.Handler, rbacHandler *rbac.Handler, overviewHandler *overview.Handler, platformHandler *platform.Handler) *gin.Engine {
 	// 设置模式
 	gin.SetMode(cfg.Server.Mode)
 
@@ -289,6 +307,7 @@ func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mc
 	skillHandler.RegisterRoutes(api)
 	rbacHandler.RegisterRoutes(api)
 	overviewHandler.RegisterRoutes(api)
+	platformHandler.RegisterRoutes(api)
 
 	// 公开 webhook 触发端点 (token 鉴权, 无 JWT)
 	workflowHandler.RegisterWebhookRoutes(router)

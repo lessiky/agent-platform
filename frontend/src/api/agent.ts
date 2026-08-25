@@ -91,6 +91,109 @@ export const agentApi = {
   getSession: (id: string, sessionId: string) =>
     apiClient.get<ApiEnvelope<{ session: ChatSession; messages: ChatMessage[] }>>(`agents/${id}/sessions/${sessionId}`),
 
+  renameSession: (id: string, sessionId: string, title: string) =>
+    apiClient.put<ApiEnvelope<ChatSession>>(`agents/${id}/sessions/${sessionId}`, { title }),
+
   deleteSession: (id: string, sessionId: string) =>
     apiClient.delete<ApiEnvelope<{ deleted: boolean }>>(`agents/${id}/sessions/${sessionId}`),
 };
+
+// ---------------------------------------------------------------------------
+// M2.5 chat 流式 (SSE, 2026-08-24): POST body 与 chat 相同, 响应为 text/event-stream
+// EventSource 不支持 POST, 故用 fetch + ReadableStream 解析
+// ---------------------------------------------------------------------------
+
+export type ChatStreamEventType =
+  | 'turn_start'
+  | 'model_round'
+  | 'tool_start'
+  | 'tool_end'
+  | 'final'
+  | 'error';
+
+export interface ChatStreamEventPayload {
+  type: ChatStreamEventType;
+  data: Record<string, unknown>;
+}
+
+export interface ChatStreamHandlers {
+  onEvent?: (evt: ChatStreamEventPayload) => void;
+  signal?: AbortSignal;
+}
+
+// SSE 流式对话: 执行过程实时回调阶段事件, 完成后 resolve 最终 ChatResult;
+// error 事件 / 非 2xx / 中断时 reject (中断为 DOMException AbortError)
+export async function chatStream(
+  id: string,
+  body: { session_id?: string; message: string },
+  handlers: ChatStreamHandlers = {},
+): Promise<ChatResult> {
+  const base = import.meta.env.VITE_API_BASE_URL || '/api/v1';
+  const token = localStorage.getItem('access_token');
+  const resp = await fetch(`${base}/agents/${id}/chat/stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: 'Bearer ' + token } : {}),
+    },
+    body: JSON.stringify(body),
+    signal: handlers.signal,
+  });
+
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try {
+      const envelope = (await resp.json()) as ApiEnvelope;
+      if (envelope?.message) msg = envelope.message;
+    } catch {
+      // 忽略非 JSON 错误体
+    }
+    if (resp.status === 401) {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('username');
+      if (window.location.pathname !== '/login') window.location.href = '/login';
+      throw new Error('登录已过期');
+    }
+    throw new Error(msg);
+  }
+  if (!resp.body) {
+    throw new Error('当前浏览器不支持流式响应');
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let result: ChatResult | null = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let eventType = 'message';
+      const dataLines: string[] = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) eventType = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+      }
+      if (dataLines.length === 0) continue; // keepalive 注释帧
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(dataLines.join('\n'));
+      } catch {
+        continue;
+      }
+      const evt: ChatStreamEventPayload = {
+        type: eventType as ChatStreamEventType,
+        data,
+      };
+      handlers.onEvent?.(evt);
+      if (eventType === 'final') result = data as unknown as ChatResult;
+      if (eventType === 'error') throw new Error(String(data?.message ?? '执行失败'));
+    }
+  }
+  if (!result) throw new Error('连接中断, 未收到最终结果');
+  return result;
+}

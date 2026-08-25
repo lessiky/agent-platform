@@ -16,8 +16,8 @@ import (
 // ---------- fakes ----------
 
 type fakeAIGenChat struct {
-	replies []string
-	calls   int
+	replies      []string
+	calls        int
 	lastMessages []modelclient.ChatMessage
 }
 
@@ -122,7 +122,6 @@ func newTestGenerator(chat *fakeAIGenChat) *WorkflowAIGenerator {
 		}}},
 	)
 }
-
 
 func TestAIGenerate_OK_FirstAttempt(t *testing.T) {
 	chat := &fakeAIGenChat{replies: []string{validGenReply}}

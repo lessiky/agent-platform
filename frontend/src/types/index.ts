@@ -662,3 +662,11 @@ export interface BoundSkillView {
   required_tools: string[];
   missing_tools: string[];
 }
+
+// ---------- 平台设置 ----------
+// 平台名 + 平台图标 (icon 为 base64 data URL, 空串 = 使用内置默认图标)
+export interface PlatformSettings {
+  name: string;
+  icon: string;
+  updated_at?: string;
+}

@@ -2,35 +2,37 @@
 //
 // 运行: go run ./tools/mock-mcp-server
 // 环境变量:
-//   MOCK_MCP_PORT    监听端口 (默认 9100)
-//   MOCK_MCP_API_KEY 如设置, 要求请求携带 Authorization: Bearer <key>
+//
+//	MOCK_MCP_PORT    监听端口 (默认 9100)
+//	MOCK_MCP_API_KEY 如设置, 要求请求携带 Authorization: Bearer <key>
 //
 // 端点:
-//   POST /mcp      JSON-RPC (initialize / tools/list / tools/call)
-//                  默认返回 application/json; 带 ?sse=1 时返回 text/event-stream
-//   GET  /sse      legacy SSE 握手: 先推送消息端点事件, 保持连接
+//
+//	POST /mcp      JSON-RPC (initialize / tools/list / tools/call)
+//	               默认返回 application/json; 带 ?sse=1 时返回 text/event-stream
+//	GET  /sse      legacy SSE 握手: 先推送消息端点事件, 保持连接
 package main
 
 import (
-    "encoding/json"
-    "fmt"
-    "log"
-    "net/http"
-    "os"
-    "sync/atomic"
-    "time"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"sync/atomic"
+	"time"
 )
 
 type rpcRequest struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id"`
-	Method  string      `json:"method"`
+	JSONRPC string          `json:"jsonrpc"`
+	ID      interface{}     `json:"id"`
+	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
 }
 
 type toolDef struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
 	InputSchema map[string]interface{} `json:"inputSchema"`
 }
 

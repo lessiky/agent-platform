@@ -7,6 +7,7 @@ import {
   ClusterOutlined,
   DashboardOutlined,
   LogoutOutlined,
+  SettingOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
   SwapOutlined,
@@ -15,6 +16,8 @@ import {
   UserOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '@/store/auth-store';
+import { usePlatformStore } from '@/store/platform-store';
+import { PlatformLogo } from '@/components/common/PlatformLogo';
 
 const { Sider, Header, Content } = Layout;
 
@@ -24,11 +27,17 @@ export function MainLayout() {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const { username, logout, permissions, fetchMe } = useAuthStore();
+  const fetchPlatform = usePlatformStore((s) => s.fetchPlatform);
 
   // 拉取当前用户角色/权限 (菜单与路由守卫依赖)
   useEffect(() => {
     fetchMe();
   }, [fetchMe]);
+
+  // 拉取平台名/图标 (侧边导航品牌展示)
+  useEffect(() => {
+    fetchPlatform();
+  }, [fetchPlatform]);
 
   const menuItems = useMemo<MenuProps['items']>(() => {
     const items: NonNullable<MenuProps['items']> = [
@@ -73,6 +82,9 @@ export function MainLayout() {
     ];
     // 系统管理: 按权限显示 (user:manage / role:manage)
     const systemItems: NonNullable<MenuProps['items']> = [];
+    if (permissions.includes('platform:manage')) {
+      systemItems.push({ key: '/system/platform', icon: <SettingOutlined />, label: '平台设置' });
+    }
     if (permissions.includes('user:manage')) {
       systemItems.push({ key: '/system/users', icon: <TeamOutlined />, label: '用户管理' });
     }
@@ -116,13 +128,11 @@ export function MainLayout() {
             alignItems: 'center',
             justifyContent: 'center',
             color: '#fff',
-            fontWeight: 600,
-            fontSize: collapsed ? 14 : 16,
             whiteSpace: 'nowrap',
             overflow: 'hidden',
           }}
         >
-          {collapsed ? 'AP' : 'Agent 管理平台'}
+          <PlatformLogo size={collapsed ? 28 : 26} withText={!collapsed} fontSize={16} textColor="#fff" />
         </div>
         <Menu
           theme="dark"

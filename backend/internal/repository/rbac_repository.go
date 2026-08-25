@@ -136,7 +136,7 @@ func (r *userRepository) ListRoleNames(ctx context.Context, userID string) ([]st
 }
 
 func (r *userRepository) UpdateProfile(ctx context.Context, id string, email *string, status *int8) error {
-    assignments := map[string]interface{}{}
+	assignments := map[string]interface{}{}
 	if email != nil {
 		assignments["email"] = email
 	}

@@ -82,3 +82,6 @@ export const SKILL_USAGE_MODE_MAP: Record<SkillsUsageMode, { label: string; hint
   metadata_injection: { label: '渐进式披露', hint: '注入技能目录, 通过 load_skill 工具按需加载正文 (默认)' },
   full_injection: { label: '全量注入', hint: '所有技能正文直接注入系统提示词 (总长上限 128KB)' },
 };
+
+// 平台设置默认值 (与后端 DefaultPlatformName 保持一致, 拉取失败时兜底展示)
+export const DEFAULT_PLATFORM_NAME = 'Agent 管理平台';

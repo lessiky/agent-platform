@@ -18,7 +18,7 @@
 
 | 方式 | 适用接口 | 说明 |
 | ---- | -------- | ---- |
-| Agent API Key | `POST /agents/:id/invoke`、`GET /agents/:id/invoke/approvals/:approvalId` | `Authorization: Bearer akp_<64位hex>`；Key 在平台内为指定 Agent 创建（见 api.md「4.15 创建 API Key」） |
+| Agent API Key | `POST /agents/:id/invoke`、`GET /agents/:id/invoke/executions/:executionId`、`POST /agents/:id/invoke/executions/:executionId/cancel`、`GET /agents/:id/invoke/approvals/:approvalId` | `Authorization: Bearer akp_<64位hex>`；Key 在平台内为指定 Agent 创建（见 api.md「4.15 创建 API Key」） |
 | Webhook Token | `POST /webhooks/workflows/:token`、`GET /webhooks/workflows/:token/executions/:id` | 无请求头；`token` 为创建工作流时生成的 32 位 hex `webhook_token`，在 URL 路径中 |
 
 ### 统一响应封装
@@ -58,26 +58,117 @@
 | `message` | string | 是 | ≤8192 | 用户提示词 |
 | `session_id` | string | 否 | 该 Agent 下已存在的会话 | 指定则复用会话（多轮上下文）；不传则自动新建（外部会话，响应中返回，可续用） |
 
-- **出参**：`200`，`data` 为 `InvokeAgentResult`：
+- **出参**：`202 accepted`，`data` 为 `InvokeAgentResult`（异步路径）：
 
 | 字段 | 类型 | 说明 |
 | ---- | ---- | ---- |
 | `agent_id` | string | Agent ID |
 | `key_prefix` | string | 使用的 Key 前缀 |
-| `reply` | string | 模型应答文本 |
-| `model` / `model_name` / `model_detail` | string | 实际使用的模型（故障转移后可能非首选） |
-| `model_ok` | bool | 模型调用是否成功 |
-| `mcp_details` | string[] | 工具调用日志行 |
-| `pending_approvals` | array | 待审核请求：`{approval_id, mcp_name, tool_name}`（对应工具**未执行**） |
-| `session_id` | string | 会话 ID（未指定时自动创建并返回，可下一轮复用） |
-| `message_id` | string | 落库消息 ID |
-| `tokens` | int | 该轮累计 token |
-| `latency_ms` | int | 耗时 |
+| `status` | string | `running`（任务已受理，执行中） |
+| `execution_id` | string | **执行任务 ID**；凭它轮询下文「2. 获取执行任务状态」获取阶段/结果 |
 
-- **特殊状态**：存在待审核工具调用时返回 `202 pending_approval`（同结构），对应工具**未执行**；外部系统凭同一 API Key 轮询下文「2. 获取 Agent 续答结果」获取终态、工具执行结果与模型续答。
-- **错误**：`401` Key 无效/过期/已吊销；`404` Agent 不存在。
+- **降级同步路径**（无可用模型时）：返回 `200`，`data` 额外含 `reply` / `model_ok`（`false`）/ `mcp_details` / `tokens` / `latency_ms`（旧结构，行为不变）。
+- **特殊状态**：执行中出现需人工审核的工具调用时，执行任务状态转为 `waiting_approval`，`result.pending_approvals` 携带待审核请求（`{approval_id, mcp_name, tool_name}`，对应工具**未执行**）；外部系统凭同一 API Key 轮询下文「4. 获取 Agent 续答结果」获取终态、工具执行结果与模型续答（审核决策后平台自动回填执行任务终态，也可回到「2. 获取执行任务状态」拿最终状态）。
+- **错误**：`401` Key 无效/过期/已吊销；`404` Agent 不存在；`409` 实例未运行。
 
-## 2. 获取 Agent 续答结果（API Key 认证）
+## 2. 获取执行任务状态（API Key 认证）
+
+- **用途**：`/invoke` 返回 `202` 后，外部系统凭同一 API Key 轮询异步执行任务的**状态、进度阶段与结果**。`status` + `stage` + `last_activity_at` 三字段可明确区分「执行中」与「卡死」，无需调整调用方超时硬扛。
+- **接口**：`GET /api/v1/agents/:id/invoke/executions/:executionId`
+- **认证**：`Authorization: Bearer akp_<key>`
+- **路径参数**：
+
+| 参数 | 说明 |
+| ---- | ---- |
+| `id` | Agent ID（须为 Key 归属的 Agent） |
+| `executionId` | `/invoke` `202` 响应的 `execution_id` |
+
+- **权限边界**：Key 只能查询**本 Agent** 的执行任务；任务不存在、ID 非 UUID 或属于其他 Agent 时一律 `404`（不泄露存在性）。
+- **出参**：`200`，`data` 为 `AgentExecution`：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `id` | string | 执行任务 ID |
+| `agent_id` / `source` / `session_id` | string | 归属 Agent / 来源（`api_invoke`）/ 会话 ID |
+| `status` | string | `running` 执行中 / `waiting_approval` 等待人工审核 / `success` 成功 / `failed` 失败 / `stalled` 卡死 / `cancelled` 已取消（外部方主动放弃） |
+| `stage` | string | 当前阶段：`queued` 已受理；`model:round=N` 第 N 次模型调用；`tool:<mcp名>/<工具名>` 正在执行该工具；`model:final (...)` 强制终答轮；`等待审核: ...` 等待人工审核 |
+| `pending_approvals` | string[] \| null | 本次执行产生的审核请求 ID 数组（进入 `waiting_approval` 时回填；审核续答轮再次命中审核门禁时**累积追加**新审核单，终态保留全部） |
+| `result` | object \| null | 执行结果（`success` 时回填 `ChatResult`：`reply` / `session_id` / `mcp_calls` / `total_tokens` / `latency_ms` 等）；进入 `waiting_approval` 时先存中间应答；审核决策完成后回填续答轮 `ChatResult`（含 `session_id` / `total_tokens` / `latency_ms`，为续答轮指标）并附加 `approval_id` / `approval_status` / `pre_review_mcp_calls`（命中审核门禁轮即**审核前**的工具调用明细，含对应 `pending` 项；多轮审核时累积各轮审核前明细） |
+| `error` | string \| null | 失败/卡死原因 |
+| `deadline` | string | 整体 deadline（平台预算：按工具轮数与单次模型/工具超时推导，调大工具超时会随之放大） |
+| `last_activity_at` | string | 最近一次**进度心跳**（每次阶段推进刷新）；与当前时间的间隔即「已多久无进展」 |
+| `started_at` / `finished_at` | string | 开始 / 结束时间 |
+
+- **终态判定**：`status ∈ {success, failed, stalled, cancelled}` 即终态。
+  - `success`：`result` 即模型应答与调用明细（含 `session_id`，可下一轮复用）。
+  - `failed`：`error` 给出原因（执行错误 / 整体 deadline 耗尽 / 审核驳回或超时未执行 / 服务重启中断）。
+  - `stalled`：平台 watchdog 判定**卡死**——running 任务超过「max(单次模型调用超时, 单次工具调用超时) + 60s」无进度心跳，任务已被主动取消；`error` 中 `stage=` 为卡死时所处阶段。
+  - `cancelled`：外部方经「3. 取消执行任务」主动放弃任务（执行上下文已取消，进行中的模型/工具调用被中断）；`error` 为取消说明。
+  - `running` 且 `stage=tool:<mcp>/<工具>` = 正在调用该工具；结合 `last_activity_at` 新鲜度即可判断存活，无需盲等。
+- **轮询建议**：间隔 2~5s。进入 `waiting_approval` 后可转轮询下文「4. 获取 Agent 续答结果」；审核决策后平台自动回填本任务终态与模型续答。
+- **错误**：`401` Key 无效/不属于该 Agent/已吊销/已过期；`404` 执行任务不存在或不属于该 Agent。
+- **出参示例**（执行中，正在调用工具）：
+
+```json
+{
+  "code": "success",
+  "message": "ok",
+  "data": {
+    "id": "44012b19-9eb2-4621-869e-c9669a6c8b2d",
+    "agent_id": "76ac5fc2-cd9a-41d1-85bb-8b8714175e2e",
+    "source": "api_invoke",
+    "session_id": "eaf56ae2-a9ed-4853-b3b4-e37921d697d3",
+    "status": "running",
+    "stage": "tool:ops-mcp/kb.search",
+    "deadline": "2026-08-24T10:13:25+08:00",
+    "last_activity_at": "2026-08-24T09:50:38+08:00",
+    "started_at": "2026-08-24T09:50:33+08:00"
+  }
+}
+```
+## 3. 取消执行任务（API Key 认证）
+
+- **用途**：外部方决定**放弃**一次未达终态的 `/invoke` 执行任务（业务侧超时、用户改变主意等）时，主动取消任务；平台取消该任务的执行上下文（透传至进行中的模型/MCP 调用），任务写入终态 `cancelled`，外部方无需继续轮询。
+- **接口**：`POST /api/v1/agents/:id/invoke/executions/:executionId/cancel`
+- **认证**：`Authorization: Bearer akp_<key>`
+- **路径参数**：
+
+| 参数 | 说明 |
+| ---- | ---- |
+| `id` | Agent ID（须为 Key 归属的 Agent） |
+| `executionId` | `/invoke` `202` 响应的 `execution_id` |
+
+- **请求体**：无。
+- **权限边界**：同「2. 获取执行任务状态」；任务不存在或属于其他 Agent 时 `404`，`execution_id` 非 UUID 时 `400`。
+- **取消语义**：
+  - `running` 且任务在当前进程执行：取消立即生效，`cancelled=true`、`status=cancelled`；进行中的模型调用/MCP 工具调用随上下文被中断，任务 `error` 记录取消说明。
+  - 已是终态（`success` / `failed` / `stalled` / `cancelled`）：**幂等**，`cancelled=false`、`status` 为当前终态——无需先判断终态再取消。
+  - `waiting_approval`：`409`——任务在等待人工审核（无进行中的上下文可中断），请经「4. 获取 Agent 续答结果」端点或平台内审核决策。
+  - `running` 但任务不在当前进程（如服务已重启）：`409`；此类任务在进程启动对账时已置为 `failed`，直接轮询「2. 获取执行任务状态」拿终态即可。
+- **出参**：`200`，`data`：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `execution_id` | string | 执行任务 ID |
+| `cancelled` | bool | 本次调用是否触发了取消 |
+| `status` | string | 操作后的任务状态（`cancelled` 或自然终态） |
+
+- **与 watchdog 的关系**：本端点与平台 watchdog（卡死/超时判定）复用同一套进程内取消机制（逐任务执行上下文）；`stalled` / `failed`（deadline 耗尽）仍由平台判定标记，`cancelled` 专指外部方主动取消。
+- **出参示例**（成功取消）：
+
+```json
+{
+  "code": "success",
+  "message": "ok",
+  "data": {
+    "execution_id": "44012b19-9eb2-4621-869e-c9669a6c8b2d",
+    "cancelled": true,
+    "status": "cancelled"
+  }
+}
+```
+
+## 4. 获取 Agent 续答结果（API Key 认证）
 
 - **用途**：`/invoke` 返回 `202`（存在待审核工具调用）后，外部系统凭同一 API Key 轮询审核请求的终态与工具执行结果，无需平台登录态。
 - **接口**：`GET /api/v1/agents/:id/invoke/approvals/:approvalId`
@@ -127,7 +218,7 @@
 }
 ```
 
-## 3. Webhook 触发工作流（公开端点）
+## 5. Webhook 触发工作流（公开端点）
 
 - **用途**：外部系统经 Webhook 直接触发工作流。
 - **接口**：`POST /api/v1/webhooks/workflows/:token`
@@ -157,21 +248,21 @@
 ```
 
 - **跟踪执行状态**：取 `data.id` 轮询（状态流转 `running` / `waiting_approval` → `success` / `failed` / `cancelled`）：
-  - 外部系统：`GET /api/v1/webhooks/workflows/:token/executions/<data.id>`（见下文「4. 查询工作流执行状态」，**仅需 webhook token**，返回状态视图，不含输入/输出 payload）
+  - 外部系统：`GET /api/v1/webhooks/workflows/:token/executions/<data.id>`（见下文「6. 查询工作流执行状态」，**仅需 webhook token**，返回状态视图，不含输入/输出 payload）
   - 平台内部：`GET /api/v1/workflow-executions/:id`（见 api.md「9.13 执行详情（含节点级记录）」，需 JWT，含节点级输入输出完整详情）
 - **约束**：工作流须为 `active`。
 
-## 4. 查询工作流执行状态（Webhook Token）
+## 6. 查询工作流执行状态（Webhook Token）
 
 - **用途**：外部系统仅凭 webhook token 轮询**本工作流**的执行状态（无需用户 JWT）。
 - **接口**：`GET /api/v1/webhooks/workflows/:token/executions/:id`
-- **认证**：无 JWT；`token` 为工作流的 `webhook_token`（与「3. Webhook 触发工作流」相同）
+- **认证**：无 JWT；`token` 为工作流的 `webhook_token`（与「5. Webhook 触发工作流」相同）
 - **入参**（path）：
 
 | 参数 | 类型 | 说明 |
 | ---- | ---- | ---- |
 | `token` | string | 工作流 webhook_token（32 位 hex） |
-| `id` | string | 执行 ID（「3. Webhook 触发工作流」触发响应的 `data.id`） |
+| `id` | string | 执行 ID（「5. Webhook 触发工作流」触发响应的 `data.id`） |
 
 - **权限边界**：
   - `token` 只能查询**其所属工作流**的执行；跨工作流查询、token 不存在均返回 `404`（不泄露其他工作流执行的存在性）

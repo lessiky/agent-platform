@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { App, Button, Card, Empty, Input, List, Popconfirm, Space, Spin, Tag, Tooltip } from 'antd';
-import { AuditOutlined, DeleteOutlined, PlusOutlined, SendOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons';
-import { agentApi } from '@/api/agent';
+import { AuditOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, StopOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons';
+import { agentApi, chatStream, type ChatStreamEventPayload } from '@/api/agent';
 import { getErrorMessage } from '@/api/client';
 import type { ChatMCPCall, ChatMessage, ChatPendingApproval, ChatSession, ChatSkillCall } from '@/types';
 import { timeAgo } from '@/utils/format';
@@ -12,6 +12,20 @@ import { MathText } from '@/components/common/MathText';
 // 技能加载状态 (M9) -> 徽标颜色 / 文案
 const SKILL_CALL_STATUS_COLOR: Record<string, string> = { ok: 'blue', partial: 'orange', duplicate: 'default', error: 'red' };
 const SKILL_CALL_STATUS_TEXT: Record<string, string> = { ok: '已加载', partial: '已加载(缺依赖)', duplicate: '已加载过', error: '加载失败' };
+
+// SSE 流式执行进度 (进度卡): 阶段文案 + 工具调用明细
+interface StreamToolItem {
+  key: string;
+  label: string;
+  status: string;
+  latencyMs?: number;
+}
+
+interface StreamProgress {
+  stage: string;
+  since: number;
+  tools: StreamToolItem[];
+}
 
 export function ChatPanel({ agentId }: { agentId: string }) {
   const { message } = App.useApp();
@@ -24,6 +38,15 @@ export function ChatPanel({ agentId }: { agentId: string }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // SSE 进度卡状态: progress 当前阶段/工具明细, now 秒级 tick, abortRef 停止控制, lastInputRef 停止后还原输入
+  const [progress, setProgress] = useState<StreamProgress | null>(null);
+  const [now, setNow] = useState(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const lastInputRef = useRef('');
+  // 会话重命名 (行内编辑): 正在重命名的会话 / 输入值 / 保存中
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameSaving, setRenameSaving] = useState(false);
 
   const loadSessions = useCallback(async (keepActive: boolean) => {
     try {
@@ -67,7 +90,14 @@ export function ChatPanel({ agentId }: { agentId: string }) {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages, sending]);
+  }, [messages, sending, progress]);
+
+  // 发送中每秒刷新, 驱动进度卡"已耗时"计数
+  useEffect(() => {
+    if (!sending) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [sending]);
 
   const onNewSession = () => {
     setActiveId(null);
@@ -89,17 +119,117 @@ export function ChatPanel({ agentId }: { agentId: string }) {
     }
   };
 
+  // 会话重命名 (PUT /agents/:id/sessions/:sid)
+  const onStartRename = (s: ChatSession, e: { stopPropagation: () => void }) => {
+    e.stopPropagation();
+    setRenamingId(s.id);
+    setRenameValue(s.title || '');
+  };
+
+  const onCancelRename = () => {
+    setRenamingId(null);
+    setRenameValue('');
+  };
+
+  const onConfirmRename = async () => {
+    const title = renameValue.trim();
+    if (!renamingId || renameSaving) {
+      return;
+    }
+    if (!title) {
+      message.warning('会话名不能为空');
+      return;
+    }
+    setRenameSaving(true);
+    try {
+      const res = await agentApi.renameSession(agentId, renamingId, title);
+      setSessions((prev) => prev.map((s) => (s.id === renamingId ? { ...s, title: res.data?.title ?? title } : s)));
+      setRenamingId(null);
+      setRenameValue('');
+      message.success('会话名已更新');
+    } catch (err) {
+      message.error(getErrorMessage(err, '修改会话名失败'));
+    } finally {
+      setRenameSaving(false);
+    }
+  };
+
+
+  // SSE 阶段事件 -> 进度卡状态 (final/error 不处理, 由 onSend 收尾清理)
+  const handleStreamEvent = useCallback((evt: ChatStreamEventPayload) => {
+    const data = evt.data;
+    const toolLabel = (d: Record<string, unknown>) =>
+      (d.mcp_name ? String(d.mcp_name) + '/' : '') + String(d.tool_name ?? '');
+    switch (evt.type) {
+      case 'turn_start':
+        setProgress({ stage: '已开始执行…', since: Date.now(), tools: [] });
+        break;
+      case 'model_round':
+        setProgress((p) => {
+          if (!p) return p;
+          const stage = data.forced ? '工具轮次用尽, 生成最终答复…' : `模型思考中 (第 ${String(data.round ?? 1)} 轮)…`;
+          return { ...p, stage };
+        });
+        break;
+      case 'tool_start':
+        setProgress((p) => {
+          const base = p ?? { stage: '', since: Date.now(), tools: [] };
+          const label = toolLabel(data);
+          return {
+            ...base,
+            stage: `调用工具 ${label}…`,
+            tools: [...base.tools, { key: `${base.tools.length}-${label}`, label, status: 'running' }],
+          };
+        });
+        break;
+      case 'tool_end':
+        setProgress((p) => {
+          if (!p) return p;
+          const label = toolLabel(data);
+          let idx = -1;
+          for (let i = p.tools.length - 1; i >= 0; i--) {
+            if (p.tools[i].status === 'running' && p.tools[i].label === label) {
+              idx = i;
+              break;
+            }
+          }
+          const tools = p.tools.map((t, i) =>
+            i === idx
+              ? { ...t, status: String(data.status ?? 'error'), latencyMs: typeof data.latency_ms === 'number' ? data.latency_ms : undefined }
+              : t,
+          );
+          return { ...p, tools, stage: '模型思考中…' };
+        });
+        break;
+      case 'final':
+      case 'error':
+        break;
+    }
+  }, []);
 
   const onSend = async () => {
     const text = input.trim();
     if (!text || sending) {
       return;
     }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    lastInputRef.current = text;
+    setNow(Date.now());
+    setProgress({ stage: '请求中…', since: Date.now(), tools: [] });
     setSending(true);
     setInput('');
+    // 乐观插入用户消息: 不等模型应答立即上屏; 成功后由服务端数据整体替换, 失败/停止时回滚移除
+    const tempId = `tmp-user-${Date.now()}`;
+    setMessages((prev) => [
+      ...prev,
+      { id: tempId, session_id: activeId ?? '', role: 'user', content: text, execution_id: null, created_at: new Date().toISOString() },
+    ]);
     try {
-      const res = await agentApi.chat(agentId, activeId ? { session_id: activeId, message: text } : { message: text });
-      const result = res.data;
+      const result = await chatStream(agentId, activeId ? { session_id: activeId, message: text } : { message: text }, {
+        signal: controller.signal,
+        onEvent: handleStreamEvent,
+      });
       if (!result) {
         message.error('响应异常');
         return;
@@ -112,9 +242,18 @@ export function ChatPanel({ agentId }: { agentId: string }) {
         setActiveId(result.session_id);
       }
     } catch (err) {
-      message.error(getErrorMessage(err, '对话失败'));
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        // 用户主动停止: 还原输入文案, 不弹错误
+        setInput(lastInputRef.current);
+      } else {
+        message.error(getErrorMessage(err, '对话失败'));
+      }
     } finally {
+      // 回滚乐观消息: 成功时列表已被服务端数据替换 (此处为 no-op), 失败/停止时移除临时气泡
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setSending(false);
+      setProgress(null);
+      abortRef.current = null;
     }
   };
 
@@ -140,7 +279,11 @@ export function ChatPanel({ agentId }: { agentId: string }) {
           locale={{ emptyText: '还没有对话, 发送消息开始' }}
           renderItem={(s) => (
             <List.Item
-              onClick={() => setActiveId(s.id)}
+              onClick={() => {
+                if (renamingId !== s.id) {
+                  setActiveId(s.id);
+                }
+              }}
               style={{
                 position: 'relative',
                 cursor: 'pointer',
@@ -149,25 +292,54 @@ export function ChatPanel({ agentId }: { agentId: string }) {
                 padding: '6px 8px',
               }}
             >
-              <div style={{ width: '100%', overflow: 'hidden', paddingRight: 20 }}>
-                <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {s.title || '未命名会话'}
+              {renamingId === s.id ? (
+                <div style={{ width: '100%', paddingRight: 8 }} onClick={(e) => e.stopPropagation()}>
+                  <Input
+                    size='small'
+                    autoFocus
+                    maxLength={128}
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onPressEnter={() => onConfirmRename()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        onCancelRename();
+                      }
+                    }}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 4, marginTop: 2 }}>
+                    <Button size='small' type='text' disabled={renameSaving} onClick={onCancelRename}>
+                      取消
+                    </Button>
+                    <Button size='small' type='link' loading={renameSaving} onClick={onConfirmRename}>
+                      保存
+                    </Button>
+                  </div>
                 </div>
-                <div style={{ fontSize: 12, color: '#8c8c8c' }}>{timeAgo(s.last_message_at)}</div>
-              </div>
-              <Popconfirm
-                title="删除对话"
-                description="将删除该会话及其中全部消息, 确定吗?"
-                okText="删除"
-                cancelText="取消"
-                okButtonProps={{ danger: true }}
-                onConfirm={async (e) => {
-                  e?.stopPropagation();
-                  await onDeleteSession(s.id);
-                }}
-              >
-                <DeleteOutlined className="session-delete-btn" onClick={(e) => e.stopPropagation()} />
-              </Popconfirm>
+              ) : (
+                <>
+                  <div style={{ width: '100%', overflow: 'hidden', paddingRight: 44 }}>
+                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {s.title || '未命名会话'}
+                    </div>
+                    <div style={{ fontSize: 12, color: '#8c8c8c' }}>{timeAgo(s.last_message_at)}</div>
+                  </div>
+                  <EditOutlined className="session-rename-btn" onClick={(e) => onStartRename(s, e)} />
+                  <Popconfirm
+                    title="删除对话"
+                    description="将删除该会话及其中全部消息, 确定吗?"
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                    onConfirm={async (e) => {
+                      e?.stopPropagation();
+                      await onDeleteSession(s.id);
+                    }}
+                  >
+                    <DeleteOutlined className="session-delete-btn" onClick={(e) => e.stopPropagation()} />
+                  </Popconfirm>
+                </>
+              )}
             </List.Item>
           )}
         />
@@ -193,8 +365,40 @@ export function ChatPanel({ agentId }: { agentId: string }) {
           )}
           {sending && (
             <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 12 }}>
-              <Spin size='small' />
-              <span style={{ marginLeft: 8, color: '#8c8c8c' }}>Agent 应答中…</span>
+              <div
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: 8,
+                  background: '#f5f5f5',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  minWidth: 260,
+                  maxWidth: '72%',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Spin size='small' />
+                  <span style={{ fontSize: 13 }}>{progress ? progress.stage : 'Agent 应答中…'}</span>
+                  {progress && (
+                    <span style={{ fontSize: 12, color: '#8c8c8c' }}>已耗时 {Math.max(0, Math.floor((now - progress.since) / 1000))}s</span>
+                  )}
+                </div>
+                {progress && progress.tools.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {progress.tools.map((t) => (
+                      <Tag
+                        key={t.key}
+                        color={t.status === 'running' ? 'blue' : t.status === 'ok' ? 'green' : t.status === 'pending' ? 'orange' : 'red'}
+                      >
+                        {t.label}
+                        {t.status === 'running' ? ' 执行中…' : ` · ${t.status}`}
+                        {t.latencyMs !== undefined ? ` ${t.latencyMs}ms` : ''}
+                      </Tag>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
           <div ref={bottomRef} />
@@ -217,6 +421,11 @@ export function ChatPanel({ agentId }: { agentId: string }) {
             <Button type='primary' icon={<SendOutlined />} loading={sending} onClick={onSend}>
               发送
             </Button>
+            {sending && (
+              <Button danger icon={<StopOutlined />} onClick={() => abortRef.current?.abort()}>
+                停止
+              </Button>
+            )}
           </Space.Compact>
         </div>
       </Card>

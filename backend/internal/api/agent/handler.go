@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -54,13 +56,23 @@ func (h *Handler) RegisterRoutes(router *gin.RouterGroup) {
 
 		// 对话 (M2.5, PRD 2.1.4): 用户提示词 -> 模型调用 + 工具调用 -> 应答
 		agents.POST("/:id/chat", middleware.AuthCheck("agent:write"), h.Chat)
+		// 对话 (SSE 流式版, 2026-08-24): body 与 /chat 相同, 响应为 text/event-stream,
+		// 实时推送执行阶段事件 (turn_start/model_round/tool_start/tool_end/final/error)
+		agents.POST("/:id/chat/stream", middleware.AuthCheck("agent:write"), h.ChatStream)
 		agents.GET("/:id/sessions", middleware.AuthCheck("agent:read"), h.ListSessions)
 		agents.GET("/:id/sessions/:sid", middleware.AuthCheck("agent:read"), h.GetSession)
+		agents.PUT("/:id/sessions/:sid", middleware.AuthCheck("agent:write"), h.RenameSession)
 		agents.DELETE("/:id/sessions/:sid", middleware.AuthCheck("agent:write"), h.DeleteSession)
 	}
 
 	// 外部调用入口 (M2 待办: API Key 调用链): 使用 Agent API Key 认证, 不走用户 JWT
+	// 2026-08-24 起为异步执行任务: 立即返回 202 + execution_id, 状态经 executions 端点查询
 	router.POST("/agents/:id/invoke", h.InvokeAgent)
+	// /invoke 执行任务状态查询: 外部系统凭 API Key 轮询异步执行的 状态/阶段/结果 (区分执行中与卡死)
+	router.GET("/agents/:id/invoke/executions/:executionId", h.GetInvokeExecution)
+	// /invoke 执行任务取消: 外部方主动放弃进行中的任务 (API Key 认证);
+	// 平台取消执行上下文 (透传进行中的模型/MCP 调用) 并标记终态 cancelled, 已终态任务幂等返回
+	router.POST("/agents/:id/invoke/executions/:executionId/cancel", h.CancelInvokeExecution)
 	// /invoke 审核结果查询: 外部系统凭 API Key 轮询 202 待审核请求的终态与工具执行结果
 	router.GET("/agents/:id/invoke/approvals/:approvalId", h.GetInvokeApproval)
 }
@@ -356,7 +368,7 @@ func (h *Handler) UpdateAgentSkills(c *gin.Context) {
 		Skills []string `json:"skills"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "invalid request body: " + err.Error())
+		response.BadRequest(c, "invalid request body: "+err.Error())
 		return
 	}
 	if err := h.svc.UpdateAgentSkills(c.Request.Context(), c.Param("id"), req.Skills, c.GetString("user_id")); err != nil {
@@ -387,12 +399,54 @@ func (h *Handler) InvokeAgent(c *gin.Context) {
 		response.Error(c, err)
 		return
 	}
-	// M4.5: 存在待审核工具调用时返回 202, 执行结果在审核详情中查看
+	// 异步执行任务: 202 + execution_id, 状态/结果经 GET /agents/:id/invoke/executions/:executionId 查询
+	if result.ExecutionID != "" {
+		response.AcceptedTask(c, result)
+		return
+	}
+	// M4.5: 降级同步路径存在待审核工具调用时返回 202, 执行结果在审核详情中查看
 	if len(result.PendingApprovals) > 0 {
 		response.Accepted(c, result)
 		return
 	}
 	response.Success(c, result)
+}
+
+// GetInvokeExecution 查询 /invoke 执行任务状态 (API Key 认证, 不走用户 JWT)
+// /invoke 返回 202 (execution_id) 后, 外部系统凭 API Key 轮询本端点:
+// status=running 时 stage 为当前阶段, last_activity_at 为最近进度心跳;
+// status 进入 success/failed/stalled/cancelled 即终态, success 时 result 为模型应答与调用明细
+func (h *Handler) GetInvokeExecution(c *gin.Context) {
+	plain := strings.TrimSpace(c.GetHeader("Authorization"))
+	if strings.HasPrefix(plain, "Bearer ") {
+		plain = strings.TrimSpace(plain[len("Bearer "):])
+	}
+	view, err := h.svc.GetInvokeExecution(c.Request.Context(), c.Param("id"), plain, c.Param("executionId"))
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, view)
+}
+
+// CancelInvokeExecution 取消 /invoke 执行任务 (API Key 认证, 不走用户 JWT)
+// 外部方主动放弃进行中的任务: 平台取消执行上下文 (透传进行中的模型/MCP 调用) 并标记终态 cancelled;
+// cancelled=true 表示本次调用触发了取消; 已终态任务幂等返回 (cancelled=false + 当前终态)
+func (h *Handler) CancelInvokeExecution(c *gin.Context) {
+	plain := strings.TrimSpace(c.GetHeader("Authorization"))
+	if strings.HasPrefix(plain, "Bearer ") {
+		plain = strings.TrimSpace(plain[len("Bearer "):])
+	}
+	exec, cancelled, err := h.svc.CancelInvokeExecution(c.Request.Context(), c.Param("id"), plain, c.Param("executionId"))
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, gin.H{
+		"execution_id": exec.ID,
+		"cancelled":    cancelled,
+		"status":       exec.Status,
+	})
 }
 
 // GetInvokeApproval 查询 /invoke 待审核请求的结果 (API Key 认证, 不走用户 JWT)
@@ -426,6 +480,56 @@ func (h *Handler) Chat(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// ChatStream 对话 (SSE 流式版): 请求体与 /chat 相同; 响应 text/event-stream:
+// event: turn_start | model_round | tool_start | tool_end | final | error
+// 前端用 fetch + ReadableStream 读取 (EventSource 不支持 POST);
+// 客户端断开时请求 ctx 取消, 后台执行链随之中止
+func (h *Handler) ChatStream(c *gin.Context) {
+	var req service.ChatRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request body: "+err.Error())
+		return
+	}
+	events, err := h.chat.ChatStream(c.Request.Context(), c.Param("id"), req, c.GetString("user_id"))
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no") // nginx 等代理禁用缓冲, 保证事件实时下发
+	c.Status(http.StatusOK)
+	c.Writer.Flush()
+
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case evt, ok := <-events:
+			if !ok {
+				return
+			}
+			data, mErr := json.Marshal(evt.Data)
+			if mErr != nil {
+				continue
+			}
+			if _, wErr := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", evt.Type, data); wErr != nil {
+				return
+			}
+			c.Writer.Flush()
+		case <-keepAlive.C:
+			if _, wErr := fmt.Fprint(c.Writer, ": keepalive\n\n"); wErr != nil {
+				return
+			}
+			c.Writer.Flush()
+		case <-c.Request.Context().Done():
+			return
+		}
+	}
+}
+
 // ListSessions 对话会话列表
 func (h *Handler) ListSessions(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -447,6 +551,24 @@ func (h *Handler) GetSession(c *gin.Context) {
 	}
 	response.Success(c, gin.H{"session": session, "messages": msgs})
 }
+
+// RenameSession 修改会话名
+func (h *Handler) RenameSession(c *gin.Context) {
+	var req struct {
+		Title string `json:"title" binding:"required,max=128"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request body: title is required (max 128 chars)")
+		return
+	}
+	session, err := h.chat.RenameSession(c.Request.Context(), c.Param("id"), c.Param("sid"), req.Title)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, session)
+}
+
 func (h *Handler) DeleteSession(c *gin.Context) {
 	if err := h.chat.DeleteSession(c.Request.Context(), c.Param("id"), c.Param("sid")); err != nil {
 		response.Error(c, err)
