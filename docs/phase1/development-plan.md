@@ -30,7 +30,6 @@
 | **前端** | React 18 + TypeScript + Ant Design + Vite | 组件丰富，生态成熟 |
 | **后端** | Go (Gin) | 高并发、适合 I/O 密集型 |
 | **数据库** | PostgreSQL 16 | 关系型 + JSONB 支持 |
-| **缓存** | Redis 7 | 会话、状态、限速 |
 | **消息队列** | RabbitMQ | 工作流异步执行 |
 | **ORM** | GORM | Go 生态最成熟的 ORM |
 | **API 文档** | Swagger / swaggo | 自动生成 API 文档 |
@@ -106,7 +105,7 @@ agent-platform/
 |------|------|----------|--------|----------|
 | 1.1 | 初始化 Go 项目（go.mod、目录结构） | 0.5d | 后端 | - |
 | 1.2 | 搭建 Gin 框架、加载配置文件 | 1d | 后端 | 1.1 |
-| 1.3 | 配置 PostgreSQL + Redis 连接 | 1d | 后端 | 1.2 |
+| 1.3 | 配置 PostgreSQL 连接 | 1d | 后端 | 1.2 |
 | 1.4 | 实现 GORM 自动迁移 + 基础 CRUD 库 | 1d | 后端 | 1.3 |
 | 1.5 | 设计用户表（User）、角色表（Role）、权限表（Permission） | 1d | 后端 | 1.1 |
 | 1.6 | 实现 JWT 认证中间件 | 1d | 后端 | 1.5 |
@@ -131,7 +130,7 @@ agent-platform/
 | 2.5 | 实现用户管理页面（CRUD + 角色分配） | 1.5d | 前端 | 后端 1.5, 1.9 |
 | 2.6 | 实现用户管理后端 API | 1d | 后端 | 1.5, 1.9 |
 | 2.7 | 实现 Dashboard 概览页面 | 1d | 前端 | 2.2 |
-| 2.8 | 配置 Docker Compose（PostgreSQL + Redis） | 1d | 后端 | - |
+| 2.8 | 配置 Docker Compose（PostgreSQL） | 1d | 后端 | - |
 | 2.9 | 编写项目 README、运行文档 | 0.5d | 全员 | - |
 
 **交付物：**

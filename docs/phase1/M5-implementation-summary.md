@@ -109,7 +109,7 @@ running ──────────────────┤
 
 ## 2. 端到端验证（2026-08-20 全部通过, 48/48）
 
-E2E 脚本: `.m5e2e/e2e.mjs` (Node, 需后端 + Postgres/Redis + mock-mcp/mock-model 服务器)。
+E2E 脚本: `.m5e2e/e2e.mjs` (Node, 需后端 + Postgres + mock-mcp/mock-model 服务器)。
 
 | 组 | 覆盖 | 结果 |
 |----|------|------|
@@ -151,7 +151,7 @@ E2E 脚本: `.m5e2e/e2e.mjs` (Node, 需后端 + Postgres/Redis + mock-mcp/mock-m
 
 ## 5. 运行方式
 
-前置: Postgres/Redis + mock 服务器 (可选):
+前置: Postgres + mock 服务器 (可选):
 
 ```powershell
 docker-compose -f infra/docker-compose.yml up -d

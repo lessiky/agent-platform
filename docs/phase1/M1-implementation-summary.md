@@ -40,7 +40,7 @@ backend/
 
 1. 安装 Go 1.21+
 2. 运行 go mod tidy 下载依赖
-3. 启动 PostgreSQL 和 Redis
+3. 启动 PostgreSQL
 4. 运行 go run ./cmd/server 测试服务
 
 ## 下一步

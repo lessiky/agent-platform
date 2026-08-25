@@ -58,7 +58,7 @@
 - M4.5 工具人工审核（工具级开关/生命周期/审核中心/审计日志）
 - M5 工作流（DAG 五类节点/重试/超时/变量传递/Cron/Webhook/审核挂起恢复/可视化编辑器）
 
-**技术基础：** Go (Gin) + GORM + PostgreSQL 16 + Redis 7 + robfig/cron 进程内调度（未引入消息队列）；前端 React 18 + TypeScript + Ant Design + Vite；Playwright E2E 已建立。
+**技术基础：** Go (Gin) + GORM + PostgreSQL 16 + robfig/cron 进程内调度（未引入消息队列）；前端 React 18 + TypeScript + Ant Design + Vite；Playwright E2E 已建立。
 
 **遗留待办（本阶段吸收）：**
 - 无告警能力（Phase 1 风险表"审核积压 P2 通知"未落地）
@@ -78,7 +78,7 @@
 | 监控栈 | Prometheus + Grafana（dev 容器化） | 扩展 infra/docker-compose.yml |
 | 邮件通知 | net/smtp（Go 标准库） | 不引入新依赖 |
 | 指标汇聚 | PostgreSQL rollup 表 + 进程内定时任务 | M6 产出，M7 性能画像复用 |
-| 限流 | Redis 令牌桶（自研轻量实现） | API Key / Agent 粒度 |
+| 限流 | 令牌桶（自研轻量实现） | API Key / Agent 粒度 |
 | 编辑器撤销重做 | JSON 快照栈（限深 50） | 不引入新状态管理库 |
 
 **设计原则：** 延续 Phase 1 的"进程内调度 + 单二进制部署"模式，不引入 Kafka/RabbitMQ；所有新增组件可在单机 docker-compose 内运行。
@@ -143,7 +143,7 @@
 | 序号 | 任务 | 工时 | 负责人 | 前置条件 |
 |------|------|------|--------|----------|
 | 1.1 | 设计 `stat_hourly` rollup 表 + 索引 + 保留策略 (30 天清理任务) | 0.5d | 后端 | - |
-| 1.2 | 实现 rollup 收集器（cron 小时级聚合，复用现有查询；分钟级实时值缓存于 Redis） | 1.5d | 后端 | 1.1 |
+| 1.2 | 实现 rollup 收集器（cron 小时级聚合，复用现有查询；分钟级实时值进程内缓存） | 1.5d | 后端 | 1.1 |
 | 1.3 | 告警四表数据模型 + GORM AutoMigrate | 0.5d | 后端 | - |
 | 1.4 | 规则引擎核心（指标查询 → 阈值比较 → 级别判定 → 同规则同目标去重聚合） | 2d | 后端 | 1.1, 1.3 |
 | 1.5 | webhook 通知通道（JSON payload + 可选 HMAC-SHA256 签名 + 3 次重试） | 1d | 后端 | 1.3 |
@@ -206,7 +206,7 @@ GET    /api/v1/alerts/summary                # 概览: 按级别统计当前 act
 | MCP 健康 | `ap_mcp_server_up` / `ap_mcp_health_check_total` | gauge / counter | server_id, result |
 | 工作流 | `ap_workflow_run_total` / `ap_workflow_run_duration_seconds` / `ap_workflow_node_duration_seconds` | counter / histogram / histogram | workflow_id, status / node_type |
 | 审核 | `ap_approval_pending` / `ap_approval_timeout_total` | gauge / counter | - |
-| 系统 | pg/redis 连接池占用、goroutine、GC | gauge | - |
+| 系统 | pg 连接池占用、goroutine、GC | gauge | - |
 
 约定：统一 `ap_` 前缀；histogram bucket 覆盖 10ms–30s；`/metrics` 独立于 `/api` 路由，默认仅监听内网 + 可选 Bearer Token。
 
@@ -219,7 +219,7 @@ GET    /api/v1/alerts/summary                # 概览: 按级别统计当前 act
 | 3.1 | 引入 client_golang，/metrics 端点（独立路由 + 可选 token 鉴权） | 0.5d | 后端 | - |
 | 3.2 | HTTP 中间件指标（route 模板化，防 label 爆炸） | 0.5d | 后端 | 3.1 |
 | 3.3 | 业务指标埋点：agent/model/mcp/workflow/approval 五组（嵌入现有调用链，复用 execution_id 上下文） | 2d | 后端 | 3.1 |
-| 3.4 | 系统指标：pg 连接池 / redis 池 / goroutine / GC | 0.5d | 后端 | 3.1 |
+| 3.4 | 系统指标：pg 连接池 / goroutine / GC | 0.5d | 后端 | 3.1 |
 | 3.5 | infra/docker-compose 增加 prometheus + grafana 服务 + 抓取配置 | 0.5d | 后端 | - |
 | 3.6 | 指标单测（promtest 校验指标名/标签/bucket） | 0.5d | 后端 | 3.3 |
 | 3.7 | 缓冲 + 代码评审 | 0.5d | 后端 | - |
@@ -281,7 +281,7 @@ GET    /api/v1/alerts/summary                # 概览: 按级别统计当前 act
 
 | 序号 | 任务 | 工时 | 负责人 | 前置条件 |
 |------|------|------|--------|----------|
-| 7.1 | Agent 配额后端：并发上限（Redis 信号量）+ 每日调用上限（Redis 计数，UTC+8 日切） | 1.5d | 后端 | - |
+| 7.1 | Agent 配额后端：并发上限（信号量）+ 每日调用上限（计数，UTC+8 日切） | 1.5d | 后端 | - |
 | 7.2 | 配额命中处理：429 + Retry-After + 运行日志记录 + 接入 M6 告警规则（配额使用率复用 4.4 模型配额规则模式） | 0.5d | 后端 | 7.1, M6 |
 | 7.3 | MCP 版本管理：配置变更产生版本快照（endpoint/凭证引用/工具集）+ 版本历史 API + 回滚（回滚后即时重检 + 工具快照 diff 提示） | 1.5d | 后端 | - |
 | 7.4 | 观察者角色：内置 viewer（仅 `*:read`）+ 前端隐藏写操作入口 + 后端写接口 403 | 1d | 全员 | - |
@@ -298,7 +298,7 @@ GET    /api/v1/alerts/summary                # 概览: 按级别统计当前 act
 
 | 序号 | 任务 | 工时 | 负责人 | 前置条件 |
 |------|------|------|--------|----------|
-| 8.1 | 限流：API Key / IP 粒度令牌桶（Redis，默认关闭可配置，429 标准响应） | 1d | 后端 | - |
+| 8.1 | 限流：API Key / IP 粒度令牌桶（默认关闭可配置，429 标准响应） | 1d | 后端 | - |
 | 8.2 | 全局审计日志：`audit_logs` 表（用户/时间/动作/资源/变更摘要）+ 中间件自动记录写操作 + 系统设置页审计日志 UI（检索/导出） | 1.5d | 全员 | - |
 | 8.3 | 安全检查：密码策略（长度/复杂度）、API Key 到期提醒（临期 7 天告警）、敏感字段脱敏审查（凭证/密钥/token） | 1d | 后端 | - |
 | 8.4 | E2E 全量回归：M6–M8 新流程 + Phase 1 主链路回归 | 1d | 全员 | - |

@@ -494,7 +494,6 @@ package config
 type Config struct {
     Server   ServerConfig
     Database DatabaseConfig
-    Redis    RedisConfig
     RabbitMQ RabbitMQConfig
     JWT      JWTConfig
 }

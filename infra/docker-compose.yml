@@ -1,21 +1,73 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: agent_platform
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
       - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: agent-platform/backend:latest
+    container_name: agent-platform-backend
+    environment:
+      SERVER_PORT: "8080"
+      SERVER_MODE: release
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: agent_platform
+      DB_SSLMODE: disable
+      JWT_SECRET: ${JWT_SECRET:-406291d0623c85bbbe25b3df3fa2e30f3f9df04c435f93e401b81e49da79857d}
+      JWT_EXPIRE_HOUR: "24"
+      MCP_CREDENTIALS_KEY: ${MCP_CREDENTIALS_KEY:-230675a9bc3001750f2de2f2634673d12d9465f50837c7b3b26a2331076fab42}
+      MCP_HEALTH_INTERVAL: 1m
+      MCP_CHECK_TIMEOUT: 60s
+      MODEL_CREDENTIALS_KEY: ${MODEL_CREDENTIALS_KEY:-f3a1c8d2e9b47056a0d3c2b1e8f7a6954c3b2a1d0e9f8a7b6c5d4e3f2a1b0c9d}
+      MODEL_HEALTH_INTERVAL: 1m
+      MODEL_CHECK_TIMEOUT: 5s
+      MODEL_CHAT_TIMEOUT: 120s
     ports:
-      - "16379:6379"
+      - "${BACKEND_PORT:-8080}:8080"
+    volumes:
+      - backend_logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    image: agent-platform/frontend:latest
+    container_name: agent-platform-frontend
+    ports:
+      - "${FRONTEND_PORT:-8081}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  backend_logs:

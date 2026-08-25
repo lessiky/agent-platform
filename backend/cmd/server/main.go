@@ -295,6 +295,11 @@ func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mc
 	router.Use(middleware.TraceID())
 	router.Use(middleware.CORS())
 
+	// 容器健康检查端点
+	router.GET("/healthz", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
 	// 注册路由
 	authHandler := auth.NewHandler()
 	api := router.Group("/api/v1")

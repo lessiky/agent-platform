@@ -14,7 +14,7 @@ AI Agent 统一管理平台：支持 Agent 创建与运行管理、模型路由�
 | 模型管理     | 模型模板 CRUD、连通性检测、配额、优先级路由            | 模型管理          | `model:read` / `model:write`                            |
 | 审核中心     | MCP 工具调用人工审核（通过 / 驳回 / 超时策略）        | 审核中心          | 查看 `mcp:read`，通过 / 驳回 `mcp:approve`                     |
 | 工作流      | DAG 编排、执行引擎、Cron 定时、Webhook 触发、执行追踪 | 工作流管理         | `workflow:read` / `workflow:write` / `workflow:execute` |
-| 系统管理     | 用户 / 角色 / 权限管理, 平台设置 (平台名 / 图标)    | 系统管理          | `user:manage` / `role:manage` / `platform:manage`       |
+| 系统管理     | 用户 / 角色 / 权限管理, 平台设置 (平台名 / 图标)     | 系统管理          | `user:manage` / `role:manage` / `platform:manage`       |
 
 ## 模块状态
 
@@ -29,20 +29,21 @@ AI Agent 统一管理平台：支持 Agent 创建与运行管理、模型路由�
 
 ## 前提条件
 
-- Go 1.21+ (如未安装: `winget install GoLang.Go`)
-- Node.js 18+ (前端)
-- PostgreSQL 16+
-- Redis 7+
+- Docker + Docker Compose v2 (Docker 部署必需; 本地开发启动依赖服务也使用它)
+- Go 1.21+ (仅本地开发需要, 如未安装: `winget install GoLang.Go`)
+- Node.js 18+ (仅本地开发需要, 前端)
+- PostgreSQL 16+ (仅本地开发需要, Docker 部署使用内置容器)
 
-## 快速开始
+## 快速开始（非Docker部署）
 
-### 1. 启动依赖服务
+### 1. 启动依赖服务（或单独部署postgres数据库）
 
 ```powershell
-docker-compose -f infra/docker-compose.yml up -d
+docker compose -f infra/docker-compose.yml up -d postgres
 ```
 
-- 本地端口映射: PostgreSQL `15432`、Redis `16379` (见 `infra/docker-compose.yml`, `backend/.env` 已按此配置)
+- 本地端口映射: PostgreSQL `15432` (见 `infra/docker-compose.yml`, `backend/.env` 已按此配置)
+- 注意: 裸 `up -d` 会连同 backend/frontend 一起启动 (全容器化), 见下方「Docker 部署」
 
 ### 2. 启动后端
 
@@ -81,6 +82,56 @@ MOCK_MCP_PORT=9100 MOCK_MCP_API_KEY=mock-mcp-key-123 go run ./tools/mock-mcp-ser
 MOCK_MODEL_PORT=9101 MOCK_MODEL_API_KEY=mock-model-key-123 go run ./tools/mock-model-server
 ```
 
+## 快速开始（Docker 部署）
+
+全部服务 (PostgreSQL / 后端 / 前端) 容器化运行。前端由 nginx 托管: 静态资源直接下发, `/api` 反向代理到后端容器 (前端无需跨域配置, 与 dev 的 vite proxy 行为一致)。
+
+### 一键启动
+
+```powershell
+make up
+# 或
+docker compose -f infra/docker-compose.yml up -d --build
+```
+
+- 访问入口: 前端 http://localhost:8081 (后端 API 也可直连 http://localhost:8080)
+- 启动顺序由健康检查保证: postgres 就绪 → 后端 `/healthz` 通过 → 前端
+- 首次启动自动迁移表结构并初始化 RBAC 角色权限; 打开前端页面注册账号即可 (首个注册用户自动成为 admin, 见「模块操作说明 - 登录与注册」)
+
+### 相关文件
+
+| 文件                         | 说明                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| `backend/Dockerfile`       | Go 多阶段构建 (golang:1.25-alpine → alpine:3.21), 容器内 Go 依赖走 goproxy.cn              |
+| `frontend/Dockerfile`      | node:20-alpine 构建 (tsc + vite) → nginx:1.27-alpine 托管                           |
+| `frontend/nginx.conf`      | SPA history 回退、`/api` 反代、gzip、静态资源长缓存、上传大小上限 20MB (覆盖技能包 10MB 限制)、LLM 长读超时 300s |
+| `infra/docker-compose.yml` | 三个服务 + 健康检查 + 数据卷 (postgres_data / backend_logs)                                |
+
+### 端口与参数
+
+均可通过环境变量覆盖, 无需改 compose (示例: `BACKEND_PORT=9000 FRONTEND_PORT=9001 make up`):
+
+| 变量                      | 默认值        | 说明                         |
+| ----------------------- | ---------- | -------------------------- |
+| `FRONTEND_PORT`         | `8081`     | 前端 (nginx) 宿主机端口           |
+| `BACKEND_PORT`          | `8080`     | 后端宿主机端口                    |
+| `POSTGRES_PASSWORD`     | `postgres` | PostgreSQL 密码              |
+| `JWT_SECRET`            | 内置默认值      | JWT 签名密钥, **生产部署务必更换**     |
+| `MCP_CREDENTIALS_KEY`   | 内置默认值      | MCP 凭证加密密钥 (64 位 hex)      |
+| `MODEL_CREDENTIALS_KEY` | 内置默认值      | 模型 API Key 加密密钥 (64 位 hex) |
+
+- PostgreSQL `15432` 的宿主机端口映射保留给本地开发用, 纯容器部署时可从 compose 中移除
+- 数据持久化: `postgres_data` 卷 (数据库), `backend_logs` 卷 (后端日志)
+
+### 常用命令
+
+```powershell
+make up                # 构建并启动全部容器
+make down              # 停止全部容器
+docker compose -f infra/docker-compose.yml logs -f backend    # 查看后端日志
+docker compose -f infra/docker-compose.yml up -d --build backend  # 单独重建某服务
+```
+
 ## 模块操作说明
 
 ### 1. 登录与注册
@@ -89,11 +140,11 @@ MOCK_MODEL_PORT=9101 MOCK_MODEL_API_KEY=mock-model-key-123 go run ./tools/mock-m
 - **平台首个注册用户自动获得 admin 角色**；之后注册的用户默认分配 `user` 角色（只读），需管理员在「用户管理」中分配角色。日后若管理员被全部禁用，下一个注册用户会自动接任 admin。
 - 内置角色与权限：
 
-| 角色         | 说明   | 权限                                                                            |
-| ---------- | ---- | ----------------------------------------------------------------------------- |
-| `admin`    | 管理员  | 全部 15 个权限点（含 `mcp:approve` / `user:manage` / `role:manage` / `platform:manage`） |
+| 角色         | 说明   | 权限                                                                                |
+| ---------- | ---- | --------------------------------------------------------------------------------- |
+| `admin`    | 管理员  | 全部 15 个权限点（含 `mcp:approve` / `user:manage` / `role:manage` / `platform:manage`）   |
 | `operator` | 运营   | 业务读写（除 `mcp:approve` / `user:manage` / `role:manage` / `platform:manage` 外的 11 个） |
-| `user`     | 默认角色 | 只读（`agent:read` / `mcp:read` / `model:read` / `workflow:read` / `skill:read`） |
+| `user`     | 默认角色 | 只读（`agent:read` / `mcp:read` / `model:read` / `workflow:read` / `skill:read`）     |
 
 - 用户被停用或删除后，其存量 JWT 立即失效。
 - 菜单与按钮按当前用户权限动态显示；无权限的页面直接访问返回 403。
@@ -102,8 +153,8 @@ MOCK_MODEL_PORT=9101 MOCK_MODEL_API_KEY=mock-model-key-123 go run ./tools/mock-m
 
 - 「概览」页两个页签：
 
-  - **基本情况**：Agent / MCP / 模型 / 技能 / 工作流 / 审批的总数与健康计数；「运行中的 Agent」列表每 5 秒自动刷新。
-  - **工作流看板**：工作流执行状态计数 + 最近 10 条执行记录，点击可跳转执行追踪。
+    - **基本情况**：Agent / MCP / 模型 / 技能 / 工作流 / 审批的总数与健康计数；「运行中的 Agent」列表每 5 秒自动刷新。
+    - **工作流看板**：工作流执行状态计数 + 最近 10 条执行记录，点击可跳转执行追踪。
 
 ### 3. Agent 管理
 
@@ -166,11 +217,14 @@ MOCK_MODEL_PORT=9101 MOCK_MODEL_API_KEY=mock-model-key-123 go run ./tools/mock-m
 **Agent 关联与运行时注入**
 
 - 在 Agent 创建 / 编辑表单勾选「关联技能」；保存时校验技能 `required_tools` ⊆ Agent 可用工具集，不满足会返回缺失工具列表并拒绝关联。
+
 - 两种注入模式（Agent 表单「技能注入模式」）：
 
-  - `metadata_injection`（默认，渐进式披露）：系统提示词追加技能目录（名称 + 描述），模型按需调用内置工具 `load_skill(技能名)` 加载正文；
-  - `full_injection`：全部技能正文直接注入系统提示词。
+    - `metadata_injection`（默认，渐进式披露）：系统提示词追加技能目录（名称 + 描述），模型按需调用内置工具 `load_skill(技能名)` 加载正文；
+    - `full_injection`：全部技能正文直接注入系统提示词。
+
 - 安全边界：平台对技能包只做存储与只读注入，不执行包内任何代码；正文按参考数据注入（带分隔符，防提示词注入）。
+
 - 使用追溯：对话消息的执行元数据含 `skill_calls`（技能名 / 版本 / 模式 / 状态）。
 
 ### 6. MCP 管理

@@ -12,7 +12,6 @@ import (
 type Config struct {
 	Server   ServerConfig
 	Database DatabaseConfig
-	Redis    RedisConfig
 	JWT      JWTConfig
 	MCP      MCPConfig
 	Model    ModelConfig
@@ -31,14 +30,6 @@ type DatabaseConfig struct {
 	Name     string `env:"DB_NAME" envDefault:"agent_platform"`
 	SSLMode  string `env:"DB_SSLMODE" envDefault:"disable"`
 }
-
-type RedisConfig struct {
-	Host     string `env:"REDIS_HOST" envDefault:"localhost"`
-	Port     int    `env:"REDIS_PORT" envDefault:"6379"`
-	Password string `env:"REDIS_PASSWORD"`
-	DB       int    `env:"REDIS_DB" envDefault:"0"`
-}
-
 type JWTConfig struct {
 	Secret     string `env:"JWT_SECRET"`
 	ExpireHour int    `env:"JWT_EXPIRE_HOUR" envDefault:"24"`
