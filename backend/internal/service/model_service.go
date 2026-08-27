@@ -65,6 +65,17 @@ type ProbeView struct {
 	Error       string   `json:"error,omitempty"`
 }
 
+// HiView 发送Hi消息测试结果视图 (验证模型能否正常生成回复)
+type HiView struct {
+	OK           bool   `json:"ok"`
+	LatencyMs    int    `json:"latency_ms"`
+	Content      string `json:"content,omitempty"`
+	Model        string `json:"model,omitempty"`
+	FinishReason string `json:"finish_reason,omitempty"`
+	TotalTokens  int    `json:"total_tokens,omitempty"`
+	Error        string `json:"error,omitempty"`
+}
+
 // RouteSkip 路由候选跳过原因
 type RouteSkip struct {
 	Name   string `json:"name"`
@@ -124,6 +135,7 @@ type ModelTemplateService interface {
 	Delete(ctx context.Context, id string) error
 
 	Test(ctx context.Context, id string) (*ProbeView, error)
+	SayHi(ctx context.Context, id string) (*HiView, error)
 	CheckHealth(ctx context.Context, t *model.ModelTemplate) *ProbeView
 	Health(ctx context.Context, id string, limit int) (map[string]interface{}, error)
 
@@ -343,6 +355,54 @@ func (s *modelTemplateService) Test(ctx context.Context, id string) (*ProbeView,
 		return nil, err
 	}
 	return s.CheckHealth(ctx, t), nil
+}
+
+// SayHi 发送Hi消息测试: 真实调用一次对话接口, 验证模型能否正常生成回复
+// (不消费配额, 不改变模板状态)
+func (s *modelTemplateService) SayHi(ctx context.Context, id string) (*HiView, error) {
+	t, err := s.templates.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status == model.ModelStatusInactive {
+		return &HiView{OK: false, Error: "模板已手动停用"}, nil
+	}
+	if t.Provider != "openai" && t.Provider != "custom" {
+		return &HiView{OK: false, Error: fmt.Sprintf("provider %s 的对话接口暂不支持 (仅 openai/custom)", t.Provider)}, nil
+	}
+	client, err := s.chatClient(t)
+	if err != nil {
+		return &HiView{OK: false, Error: err.Error()}, nil
+	}
+	start := time.Now()
+	res, err := client.Chat(ctx, t.Model, []modelclient.ChatMessage{{Role: "user", Content: "Hi"}}, nil, genOptionsFromConfig(t))
+	latency := int(time.Since(start).Milliseconds())
+	if err != nil {
+		return &HiView{OK: false, LatencyMs: latency, Error: truncate(err.Error(), 300)}, nil
+	}
+	return &HiView{
+		OK:           true,
+		LatencyMs:    latency,
+		Content:      res.Content,
+		Model:        res.Model,
+		FinishReason: res.FinishReason,
+		TotalTokens:  res.TotalTokens,
+	}, nil
+}
+
+// genOptionsFromConfig 解析模板生成参数为对话选项 (解析失败返回零值)
+func genOptionsFromConfig(t *model.ModelTemplate) modelclient.GenOptions {
+	var gen modelclient.GenOptions
+	if len(t.Config) == 0 {
+		return gen
+	}
+	var cfg ModelGenConfig
+	if err := json.Unmarshal(t.Config, &cfg); err != nil {
+		return gen
+	}
+	gen.Temperature = cfg.Temperature
+	gen.MaxTokens = cfg.MaxTokens
+	return gen
 }
 
 // CheckHealth 连通性探测: 更新状态/延迟 + 记录历史

@@ -14,6 +14,7 @@ const NODE_TYPE_LABEL: Record<string, string> = {
   http: 'HTTP',
   delay: '延迟',
   condition: '条件',
+  print: '打印输出',
 };
 
 const STATUS_COLOR: Record<string, string> = {
@@ -255,6 +256,19 @@ function TraceInner() {
               <Typography.Text type="danger">{detail.error}</Typography.Text>
             </Descriptions.Item>
           )}
+          <Descriptions.Item label="工作流输出" span={4}>
+            {detail.print_output && detail.print_output.length > 0 ? (
+              <div>
+                {detail.print_output.map((entry, i) => (
+                  <div key={`${entry.node_id}-${i}`} style={{ color: entry.color || undefined, wordBreak: 'break-all' }}>
+                    {entry.node_name}：{entry.message}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              '—'
+            )}
+          </Descriptions.Item>
         </Descriptions>
       </Card>
 

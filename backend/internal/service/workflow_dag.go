@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -87,7 +88,7 @@ func ValidateDefinition(def *WorkflowDefinition) error {
 
 	validTypes := map[string]bool{
 		model.NodeTypeAgent: true, model.NodeTypeMCPTool: true, model.NodeTypeHTTP: true,
-		model.NodeTypeDelay: true, model.NodeTypeCondition: true,
+		model.NodeTypeDelay: true, model.NodeTypeCondition: true, model.NodeTypePrint: true,
 	}
 	nodeSet := make(map[string]bool, len(def.Nodes))
 	for i := range def.Nodes {
@@ -101,7 +102,7 @@ func ValidateDefinition(def *WorkflowDefinition) error {
 		}
 		nodeSet[node.ID] = true
 		if !validTypes[node.Type] {
-			return errors.NewValidationError(fmt.Sprintf("节点 %s 类型无效: %s (支持 agent/mcp_tool/http/delay/condition)", node.ID, node.Type))
+			return errors.NewValidationError(fmt.Sprintf("节点 %s 类型无效: %s (支持 agent/mcp_tool/http/delay/condition/print)", node.ID, node.Type))
 		}
 		if err := validateNodeConfig(node); err != nil {
 			return err
@@ -232,6 +233,13 @@ func validateNodeConfig(node *WorkflowNodeDef) error {
 				return errors.NewValidationError(fmt.Sprintf("节点 %s: condition 节点缺少 config.right", node.ID))
 			}
 		}
+	case model.NodeTypePrint:
+		if strings.TrimSpace(strOf(cfg, "message")) == "" {
+			return errors.NewValidationError(fmt.Sprintf("节点 %s: print 节点缺少 config.message (输出内容)", node.ID))
+		}
+		if color := strOf(cfg, "color"); color != "" && !isHexColor(color) {
+			return errors.NewValidationError(fmt.Sprintf("节点 %s: print 节点 config.color 无效: %s (仅支持 #rgb 或 #rrggbb)", node.ID, color))
+		}
 	}
 
 	// 重试策略
@@ -318,6 +326,13 @@ func checkAcyclic(def *WorkflowDefinition) error {
 		return errors.NewValidationError("DAG 存在循环依赖, 请检查连线")
 	}
 	return nil
+}
+
+var hexColorPattern = regexp.MustCompile(`^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
+
+// isHexColor 是否为 #rgb / #rrggbb 形式的颜色值
+func isHexColor(s string) bool {
+	return hexColorPattern.MatchString(s)
 }
 
 // ---------- 变量解析 ----------

@@ -6,6 +6,7 @@ import type {
   ModelQuery,
   ModelTemplate,
   ModelTestResult,
+  ModelHiResult,
   ModelQuota,
   ModelUsageData,
   ModelUsageSummary,
@@ -32,6 +33,9 @@ export const modelApi = {
 
   test: (id: string) =>
     apiClient.post<ApiEnvelope<ModelTestResult>>(`/model-templates/${id}/test`),
+
+  sayHi: (id: string) =>
+    apiClient.post<ApiEnvelope<ModelHiResult>>(`/model-templates/${id}/say-hi`),
 
   getHealth: (id: string, limit = 100) =>
     apiClient.get<ApiEnvelope<ModelHealthData>>(`/model-templates/${id}/health`, { params: { limit } }),

@@ -109,9 +109,8 @@ export function AgentDetailPage() {
 
   const config = agent.config ?? {};
   const apiBase = import.meta.env.VITE_API_BASE_URL || '/api/v1';
-  const invokeUrl = /^https?:\/\//.test(apiBase)
-    ? `${apiBase}/agents/${agent.id}/invoke`
-    : `${window.location.origin}${apiBase}/agents/${agent.id}/invoke`;
+  const apiBasePath = /^https?:\/\//.test(apiBase) ? new URL(apiBase).pathname : apiBase;
+  const invokePath = `${apiBasePath}/agents/${agent.id}/invoke`;
 
   return (
     <div>
@@ -169,8 +168,8 @@ export function AgentDetailPage() {
             <span style={{ color: 'var(--color-text-secondary)' }}>{timeAgo(instance?.last_heartbeat)}</span>
           </Descriptions.Item>
           <Descriptions.Item label="端点" span={3}>
-            <Tooltip title="外部调用需携带 API Key (Authorization: Bearer akp_...); 实例未运行时调用会被拒绝 (409)">
-              <span className="mono-text">{invokeUrl}</span>
+            <Tooltip title="完整地址 = 平台部署地址 + 以下路径; 调用需携带 API Key (Authorization: Bearer akp_...); 实例未运行时调用会被拒绝 (409)">
+              <span className="mono-text">{`POST ${invokePath}`}</span>
             </Tooltip>
           </Descriptions.Item>
         </Descriptions>

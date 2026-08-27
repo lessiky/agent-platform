@@ -135,7 +135,7 @@ func (e *WorkflowEngine) Cancel(ctx context.Context, execID string) error {
 
 func (e *WorkflowEngine) forceTerminal(ctx context.Context, exec *model.WorkflowExecution, status, errMsg string) error {
 	now := time.Now()
-	ok, err := e.executions.MarkFinished(ctx, exec.ID, status, errMsg, nil, now)
+	ok, err := e.executions.MarkFinished(ctx, exec.ID, status, errMsg, nil, nil, now)
 	if err != nil {
 		return err
 	}
@@ -160,7 +160,7 @@ func (e *WorkflowEngine) ReconcileOnStartup(ctx context.Context) {
 		if exec.Status != model.ExecutionStatusRunning {
 			continue
 		}
-		if _, err := e.executions.MarkFinished(ctx, exec.ID, model.ExecutionStatusFailed, "服务重启, 执行中断", nil, now); err == nil {
+		if _, err := e.executions.MarkFinished(ctx, exec.ID, model.ExecutionStatusFailed, "服务重启, 执行中断", nil, nil, now); err == nil {
 			_ = e.nodes.MarkAll(ctx, exec.ID, model.NodeStatusFailed)
 			log.Printf("workflow: reconciled interrupted execution %s", exec.ID)
 		}
@@ -197,7 +197,7 @@ func (e *WorkflowEngine) loop(ctx context.Context, execID string) {
 		if ctx.Err() != nil {
 			// 取消收尾: 用后台 context 将执行置为 cancelled (幂等, 已被其他终态接管时 MarkFinished 不生效)
 			now := time.Now()
-			if ok, err := e.executions.MarkFinished(context.Background(), execID, model.ExecutionStatusCancelled, "手动取消", nil, now); err == nil && ok {
+			if ok, err := e.executions.MarkFinished(context.Background(), execID, model.ExecutionStatusCancelled, "手动取消", nil, nil, now); err == nil && ok {
 				_ = e.nodes.MarkAll(context.Background(), execID, model.NodeStatusCancelled)
 				log.Printf("workflow: execution %s cancelled", execID)
 			}
@@ -211,12 +211,12 @@ func (e *WorkflowEngine) loop(ctx context.Context, execID string) {
 		if def == nil {
 			workflow, err := e.workflows.Get(ctx, exec.WorkflowID)
 			if err != nil {
-				_ = e.finish(ctx, execID, model.ExecutionStatusFailed, "工作流定义不存在 (可能已删除)", nil)
+				_ = e.finish(ctx, execID, model.ExecutionStatusFailed, "工作流定义不存在 (可能已删除)", nil, nil)
 				return
 			}
 			def, err = ParseDefinition(workflow.Definition)
 			if err != nil {
-				_ = e.finish(ctx, execID, model.ExecutionStatusFailed, "DAG 定义校验失败: "+err.Error(), nil)
+				_ = e.finish(ctx, execID, model.ExecutionStatusFailed, "DAG 定义校验失败: "+err.Error(), nil, nil)
 				return
 			}
 		}
@@ -275,7 +275,7 @@ func (e *WorkflowEngine) loop(ctx context.Context, execID string) {
 			if ns.record.Status == model.NodeStatusFailed {
 				_ = e.nodes.MarkAll(ctx, execID, model.NodeStatusSkipped)
 				errMsg := fmt.Sprintf("节点 %s (%s) 执行失败: %s", ns.def.ID, ns.def.Name, ns.record.Error)
-				_ = e.finish(ctx, execID, model.ExecutionStatusFailed, errMsg, e.collectOutput(stateMap))
+				_ = e.finish(ctx, execID, model.ExecutionStatusFailed, errMsg, e.collectOutput(stateMap), e.collectPrintOutput(def, stateMap))
 				return
 			}
 		}
@@ -292,13 +292,13 @@ func (e *WorkflowEngine) loop(ctx context.Context, execID string) {
 
 		// 5. 全部终态 -> 成功
 		if allTerminal {
-			_ = e.finish(ctx, execID, model.ExecutionStatusSuccess, "", e.collectOutput(stateMap))
+			_ = e.finish(ctx, execID, model.ExecutionStatusSuccess, "", e.collectOutput(stateMap), e.collectPrintOutput(def, stateMap))
 			return
 		}
 
 		if len(ready) == 0 {
 			// 无就绪且未全部终态: 理论上校验过的 DAG 不会发生, 兜底防死锁
-			_ = e.finish(ctx, execID, model.ExecutionStatusFailed, "DAG 调度死锁 (无可执行节点)", nil)
+			_ = e.finish(ctx, execID, model.ExecutionStatusFailed, "DAG 调度死锁 (无可执行节点)", nil, e.collectPrintOutput(def, stateMap))
 			return
 		}
 
@@ -421,9 +421,49 @@ func (e *WorkflowEngine) collectOutput(stateMap map[string]*nodeState) datatypes
 	return payload
 }
 
-func (e *WorkflowEngine) finish(ctx context.Context, execID, status, errMsg string, output datatypes.JSON) error {
+// printOutputEntry 执行历史「工作流输出」的单节点条目 (前端按 message/color 逐行着色展示)
+type printOutputEntry struct {
+	NodeID   string `json:"node_id"`
+	NodeName string `json:"node_name"`
+	Message  string `json:"message"`
+	Color    string `json:"color,omitempty"`
+}
+
+// collectPrintOutput 汇总打印输出: 按 DAG 定义顺序取已成功的 print 节点, 无则返回 nil
+func (e *WorkflowEngine) collectPrintOutput(def *WorkflowDefinition, stateMap map[string]*nodeState) datatypes.JSON {
+	var entries []printOutputEntry
+	for i := range def.Nodes {
+		nodeDef := &def.Nodes[i]
+		if nodeDef.Type != model.NodeTypePrint {
+			continue
+		}
+		ns := stateMap[nodeDef.ID]
+		if ns == nil || ns.record.Status != model.NodeStatusSuccess || len(ns.record.Output) == 0 {
+			continue
+		}
+		var out struct {
+			Message string `json:"message"`
+			Color   string `json:"color"`
+		}
+		if json.Unmarshal(ns.record.Output, &out) != nil {
+			continue
+		}
+		name := strings.TrimSpace(nodeDef.Name)
+		if name == "" {
+			name = nodeDef.ID
+		}
+		entries = append(entries, printOutputEntry{NodeID: nodeDef.ID, NodeName: name, Message: out.Message, Color: out.Color})
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	payload, _ := json.Marshal(entries)
+	return payload
+}
+
+func (e *WorkflowEngine) finish(ctx context.Context, execID, status, errMsg string, output, printOutput datatypes.JSON) error {
 	now := time.Now()
-	ok, err := e.executions.MarkFinished(ctx, execID, status, errMsg, output, now)
+	ok, err := e.executions.MarkFinished(ctx, execID, status, errMsg, output, printOutput, now)
 	if err != nil {
 		return err
 	}
@@ -579,6 +619,8 @@ func (e *WorkflowEngine) runOnce(ctx context.Context, nodeDef *WorkflowNodeDef, 
 		return e.runDelayNode(ctx, config)
 	case model.NodeTypeCondition:
 		return e.runConditionNode(config)
+	case model.NodeTypePrint:
+		return e.runPrintNode(config, varCtx)
 	}
 	return nil, fmt.Errorf("未知节点类型: %s", nodeDef.Type)
 }
@@ -730,6 +772,18 @@ func (e *WorkflowEngine) runDelayNode(ctx context.Context, config map[string]int
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func (e *WorkflowEngine) runPrintNode(config map[string]interface{}, varCtx *VarContext) (interface{}, error) {
+	message := formatValue(ResolveVariables(config["message"], varCtx))
+	if strings.TrimSpace(message) == "" {
+		return nil, fmt.Errorf("打印输出内容解析后为空 (config.message)")
+	}
+	color, _ := config["color"].(string)
+	return map[string]interface{}{
+		"message": message,
+		"color":   color,
+	}, nil
 }
 
 func (e *WorkflowEngine) runConditionNode(config map[string]interface{}) (interface{}, error) {

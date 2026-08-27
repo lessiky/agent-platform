@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { Button, Card, Col, Row, Statistic, Table, Tag } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
-import { workflowApi, type DashboardData, type WorkflowExecution } from '@/api/workflow';
+import { workflowApi, type DashboardData, type PrintOutputEntry, type WorkflowExecution } from '@/api/workflow';
 import { getErrorMessage } from '@/api/client';
 import { App } from 'antd';
 import { timeAgo } from '@/utils/format';
@@ -58,6 +58,23 @@ export function WorkflowDashboardPage() {
       dataIndex: 'status',
       width: 110,
       render: (s: string) => <Tag color={EXEC_STATUS[s]?.color}>{EXEC_STATUS[s]?.label ?? s}</Tag>,
+    },
+    {
+      title: '工作流输出',
+      dataIndex: 'print_output',
+      width: 260,
+      render: (v?: PrintOutputEntry[] | null) =>
+        v && v.length > 0 ? (
+          <div>
+            {v.map((entry, i) => (
+              <div key={`${entry.node_id}-${i}`} style={{ color: entry.color || undefined, wordBreak: 'break-all' }}>
+                {entry.node_name}：{entry.message}
+              </div>
+            ))}
+          </div>
+        ) : (
+          '—'
+        ),
     },
     { title: '触发', dataIndex: 'trigger_type', width: 90 },
     { title: '开始', dataIndex: 'started_at', width: 150, render: (v: string) => timeAgo(v) },

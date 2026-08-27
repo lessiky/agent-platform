@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ReactFlow, ReactFlowProvider, addEdge, Background, Controls, MiniMap, useEdgesState, useNodesState, Handle, Position, type Node, type Edge, type Connection, type NodeProps } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { App, Button, Card, Dropdown, Form, Input, InputNumber, Modal, Select, Space, Switch, Tag, Tooltip } from 'antd';
+import { App, Button, Card, ColorPicker, Dropdown, Form, Input, InputNumber, Modal, Select, Space, Switch, Tag, Tooltip } from 'antd';
 import { ArrowLeftOutlined, CloudDownloadOutlined, PlusOutlined, RobotOutlined, RocketOutlined, SaveOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { workflowApi, type AIGenerateResult, type Workflow, type WorkflowDefinition, type WorkflowNodeDef } from '@/api/workflow';
 import { AIGenerateWorkflowModal } from './AIGenerateWorkflowModal';
@@ -19,6 +19,7 @@ const NODE_TYPES_META: Record<string, { label: string; color: string; desc: stri
   http: { label: 'HTTP', color: '#13c2c2', desc: '外部 HTTP 调用' },
   delay: { label: '延迟', color: '#faad14', desc: '等待指定秒数' },
   condition: { label: '条件', color: '#eb2f96', desc: '按表达式选择分支' },
+  print: { label: '打印输出', color: '#52c41a', desc: '输出内容到执行历史, 支持文字颜色' },
 };
 
 // 节点出参字段 (与后端 workflow_engine 各节点 runOnce 的输出结构一致, 下游通过 $nodes.<id>.<field> 引用)
@@ -48,6 +49,10 @@ const NODE_OUTPUT_FIELDS: Record<string, { field: string; desc: string }[]> = {
   condition: [
     { field: 'result', desc: '条件求值布尔结果' },
     { field: 'chosen', desc: '选中分支 ("true"/"false"), 决定走出哪条出边' },
+  ],
+  print: [
+    { field: 'message', desc: '打印输出的内容文本' },
+    { field: 'color', desc: '文字颜色 (hex, 可为空)' },
   ],
 };
 
@@ -150,6 +155,64 @@ function parseJsonField(text: string, label: string): Record<string, unknown> | 
   }
 }
 
+// 按节点类型把表单值组装为节点定义 (JSON 字段解析失败时抛错)
+function buildNodeDefFromValues(nodeDef: WorkflowNodeDef, values: Record<string, any>): WorkflowNodeDef {
+  let config: Record<string, unknown> = {};
+  switch (nodeDef.type) {
+    case 'agent':
+      config.agent_id = values.agent_id || '';
+      config.message = values.message ?? '';
+      break;
+    case 'mcp_tool':
+      config.mcp_server_id = values.mcp_server_id || '';
+      config.tool = values.tool || '';
+      config.arguments = parseJsonField(values.arguments ?? '', 'arguments');
+      break;
+    case 'http':
+      config.method = (values.method || 'GET').toUpperCase();
+      config.url = values.url || '';
+      if (values.headers) config.headers = parseJsonField(values.headers, 'headers');
+      if (values.body && config.method !== 'GET' && config.method !== 'DELETE') {
+        config.body = parseJsonField(values.body, 'body');
+      }
+      break;
+    case 'delay':
+      config.seconds = values.seconds ?? 1;
+      break;
+    case 'condition':
+      config.left = values.left ?? '';
+      config.operator = values.operator || '==';
+      config.right = values.right;
+      break;
+    case 'print': {
+      config.message = values.print_message ?? '';
+      // ColorPicker 经 Form 存的是 Color 对象, 落库前转为 hex 字符串
+      const colorValue = values.print_color;
+      if (colorValue) {
+        config.color = typeof colorValue === 'string' ? colorValue : colorValue.toHexString();
+      }
+      break;
+    }
+    default:
+      config = { ...(nodeDef.config ?? {}) };
+  }
+  return {
+    ...nodeDef,
+    name: (values.name as string) || nodeDef.id,
+    config,
+    ...(values.timeout_seconds ? { timeout_seconds: values.timeout_seconds as number } : {}),
+    ...(values.retry_enabled
+      ? {
+          retry: {
+            max_attempts: (values.max_attempts as number) || 1,
+            interval_seconds: (values.interval_seconds as number) || 0,
+            backoff: (values.backoff as 'fixed' | 'exponential') || 'fixed',
+          },
+        }
+      : {}),
+  };
+}
+
 // ---------- 主组件 ----------
 
 function EditorInner() {
@@ -173,6 +236,7 @@ function EditorInner() {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [tools, setTools] = useState<MCPTool[]>([]);
   const seqRef = useRef(1);
+  const prevSelectedIdRef = useRef<string | null>(null);
 
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedNodeId) ?? null,
@@ -185,6 +249,7 @@ function EditorInner() {
     try {
       const res = await workflowApi.get(id!);
       if (!res.data) { message.error('加载工作流失败'); return; }
+      prevSelectedIdRef.current = null; // 整幅画布加载, 不提交旧选中节点的表单
       setWorkflow(res.data);
       setNodes(toFlowNodes(res.data.definition));
       setEdges(toFlowEdges(res.data.definition));
@@ -215,8 +280,30 @@ function EditorInner() {
     }
   }, [selectedMcpServerId]);
 
-  // 选中节点 -> 表单同步
+  // 在选中发生变化前 (表单仍挂载、字段仍完整时) 把当前选中节点的表单值提交回节点定义。
+  // 必须在点击事件里同步提交: 等 effect 运行时表单已卸载/字段已切换,
+  // form.getFieldsValue() 只会返回当前挂载字段的值, 会把上一节点配置写成空值导致丢失。
+  const commitCurrentSelection = useCallback(() => {
+    const currentId = prevSelectedIdRef.current;
+    if (!currentId) return;
+    prevSelectedIdRef.current = null;
+    const values = form.getFieldsValue(true);
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id !== currentId) return n;
+        try {
+          const updated = buildNodeDefFromValues(n.data.nodeDef as WorkflowNodeDef, values);
+          return { ...n, data: { ...n.data, name: updated.name, nodeDef: updated } };
+        } catch {
+          return n; // 表单值不完整 (如 JSON 解析失败), 保持原配置
+        }
+      })
+    );
+  }, [form, setNodes]);
+
+  // 选中节点 -> 表单同步 (上一个节点的表单提交已在点击事件中由 commitCurrentSelection 完成)
   useEffect(() => {
+    prevSelectedIdRef.current = selectedNodeId;
     if (selectedDef) {
       const cfg = selectedDef.config ?? {};
       form.setFieldsValue({
@@ -239,6 +326,8 @@ function EditorInner() {
         left: (cfg.left as string) || '',
         operator: (cfg.operator as string) || '==',
         right: (cfg.right as string) ?? '',
+        print_message: (cfg.message as string) || '',
+        print_color: typeof cfg.color === 'string' ? cfg.color : undefined, // 仅接受 hex 字符串 (兼容旧数据中的 Color 对象)
       });
     }
   }, [selectedNodeId, form]);
@@ -250,6 +339,7 @@ function EditorInner() {
 
   const addNode = (type: string) => {
     const meta = NODE_TYPES_META[type];
+    commitCurrentSelection(); // 先把原选中节点的表单值落回节点定义
     const nid = nextId('n');
     const defaults: Record<string, WorkflowNodeDef['config']> = {
       agent: { agent_id: '', message: '$inputs.message' },
@@ -257,6 +347,7 @@ function EditorInner() {
       http: { method: 'GET', url: '' },
       delay: { seconds: 1 },
       condition: { left: '$inputs.value', operator: '==', right: '' },
+      print: { message: '', color: '' },
     };
     const nodeDef: WorkflowNodeDef = { id: nid, type: type as WorkflowNodeDef['type'], name: meta.label, config: defaults[type] ?? {} };
     setNodes((nds) => [
@@ -303,11 +394,18 @@ function EditorInner() {
     }
   }, [nodes]);
 
-  const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
-    setSelectedNodeId(node.id);
-  }, []);
+  const onNodeClick = useCallback(
+    (_: React.MouseEvent, node: Node) => {
+      commitCurrentSelection();
+      setSelectedNodeId(node.id);
+    },
+    [commitCurrentSelection]
+  );
 
-  const onPaneClick = useCallback(() => setSelectedNodeId(null), []);
+  const onPaneClick = useCallback(() => {
+    commitCurrentSelection();
+    setSelectedNodeId(null);
+  }, [commitCurrentSelection]);
 
   const buildDefinition = useCallback((flowNodes: Node[]): WorkflowDefinition => {
     const nodeDefs: WorkflowNodeDef[] = flowNodes.map((n) => n.data.nodeDef as WorkflowNodeDef);
@@ -324,44 +422,8 @@ function EditorInner() {
 
   const collectSelectedConfig = useCallback((): { nodes: Node[]; updated: WorkflowNodeDef | null } => {
     if (!selectedDef) return { nodes, updated: null };
-    const values = form.getFieldsValue();
-    const config: Record<string, unknown> = {};
-    switch (selectedDef.type) {
-      case 'agent':
-        config.agent_id = values.agent_id || '';
-        config.message = values.message ?? '';
-        break;
-      case 'mcp_tool':
-        config.mcp_server_id = values.mcp_server_id || '';
-        config.tool = values.tool || '';
-        config.arguments = parseJsonField(values.arguments ?? '', 'arguments');
-        break;
-      case 'http':
-        config.method = (values.method || 'GET').toUpperCase();
-        config.url = values.url || '';
-        if (values.headers) config.headers = parseJsonField(values.headers, 'headers');
-        if (values.body && config.method !== 'GET' && config.method !== 'DELETE') {
-          config.body = parseJsonField(values.body, 'body');
-        }
-        break;
-      case 'delay':
-        config.seconds = values.seconds ?? 1;
-        break;
-      case 'condition':
-        config.left = values.left ?? '';
-        config.operator = values.operator || '==';
-        config.right = values.right;
-        break;
-    }
-    const updated: WorkflowNodeDef = {
-      ...selectedDef,
-      name: values.name || selectedDef.id,
-      config,
-      ...(values.timeout_seconds ? { timeout_seconds: values.timeout_seconds } : {}),
-      ...(values.retry_enabled
-        ? { retry: { max_attempts: values.max_attempts || 1, interval_seconds: values.interval_seconds || 0, backoff: values.backoff || 'fixed' } }
-        : {}),
-    };
+    // buildNodeDefFromValues 可能抛错 (JSON 解析失败), 由调用方处理
+    const updated = buildNodeDefFromValues(selectedDef, form.getFieldsValue());
     const nextNodes = nodes.map((n) => (n.id === selectedDef.id ? { ...n, data: { ...n.data, name: updated.name, nodeDef: updated } } : n));
     return { nodes: nextNodes, updated };
   }, [selectedDef, form, nodes]);
@@ -369,6 +431,7 @@ function EditorInner() {
   // AI 生成确认 -> 用生成草稿替换画布 (名称/描述同步更新, 由用户保存后生效)
   const onAIGenerated = (result: AIGenerateResult) => {
     const def = result.definition;
+    prevSelectedIdRef.current = null; // 画布被整体替换, 不提交旧选中节点的表单
     setWorkflow((prev) => (prev ? { ...prev, name: result.name, description: result.description } : prev));
     setNodes(toFlowNodes(def));
     setEdges(toFlowEdges(def));
@@ -622,6 +685,16 @@ function EditorInner() {
                     </Form.Item>
                     <Form.Item name="right" label="右值 (exists 时留空)">
                       <Input placeholder="80" />
+                    </Form.Item>
+                  </>
+                )}
+                {selectedDef.type === 'print' && (
+                  <>
+                    <Form.Item name="print_message" label="输出内容 (支持变量)" rules={[{ required: true, message: '请输入输出内容' }]}>
+                      <Input.TextArea rows={3} placeholder="例如: 订单处理完成: $inputs.order_id" />
+                    </Form.Item>
+                    <Form.Item name="print_color" label="输出颜色 (可选, 默认黑色)">
+                      <ColorPicker format="hex" allowClear />
                     </Form.Item>
                   </>
                 )}

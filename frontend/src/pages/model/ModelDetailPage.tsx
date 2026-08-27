@@ -17,7 +17,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { ArrowLeftOutlined, EditOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, EditOutlined, MessageOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { modelApi } from '@/api/model';
 import { getErrorMessage } from '@/api/client';
@@ -37,13 +37,14 @@ interface QuotaFormValues {
 
 export function ModelDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [template, setTemplate] = useState<ModelTemplate | null>(null);
   const [credentials, setCredentials] = useState<{ api_key_set: boolean; api_key_mask?: string } | null>(null);
   const [health, setHealth] = useState<ModelHealthData | null>(null);
   const [usage, setUsage] = useState<{ quota: ModelQuota | null; logs: ModelUsageLog[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
+  const [sayingHi, setSayingHi] = useState(false);
   const [routeResult, setRouteResult] = useState<RouteResult | null>(null);
   const [routing, setRouting] = useState(false);
   const [quotaForm] = Form.useForm<QuotaFormValues>();
@@ -113,6 +114,53 @@ export function ModelDetailPage() {
       message.error(getErrorMessage(err, '连通性测试失败'));
     } finally {
       setTesting(false);
+    }
+  };
+
+  const onSayHi = async () => {
+    if (!id) return;
+    setSayingHi(true);
+    try {
+      const res = await modelApi.sayHi(id);
+      const result = res.data;
+      if (result?.ok) {
+        modal.success({
+          title: '模型回复正常',
+          width: 560,
+          content: (
+            <div>
+              <pre
+                style={{
+                  whiteSpace: 'pre-wrap',
+                  margin: 0,
+                  padding: 12,
+                  borderRadius: 6,
+                  background: 'var(--color-fill-quaternary, #fafafa)',
+                  maxHeight: 320,
+                  overflow: 'auto',
+                }}
+              >
+                {result.content || '(空回复)'}
+              </pre>
+              <div style={{ color: 'var(--color-text-secondary)', fontSize: 12, marginTop: 8 }}>
+                延迟 {result.latency_ms}ms · tokens {result.total_tokens ?? '-'} · finish_reason{' '}
+                {result.finish_reason || '-'}
+                {result.model ? ` · 实际模型 ${result.model}` : ''}
+              </div>
+            </div>
+          ),
+        });
+      } else {
+        modal.error({
+          title: '模型回复异常',
+          width: 560,
+          content: <div>{result?.error || '未知错误'}</div>,
+        });
+      }
+    } catch (err) {
+      message.error(getErrorMessage(err, '发送Hi消息失败'));
+    } finally {
+      setSayingHi(false);
     }
   };
 
@@ -190,6 +238,13 @@ export function ModelDetailPage() {
             onClick={onTest}
           >
             连通性测试
+          </Button>
+          <Button
+            icon={<MessageOutlined spin={sayingHi} />}
+            loading={sayingHi}
+            onClick={onSayHi}
+          >
+            发送Hi消息
           </Button>
           {id && (
             <Link to={`/models/${id}/edit`}>

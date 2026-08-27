@@ -33,6 +33,8 @@ func (h *Handler) RegisterRoutes(router *gin.RouterGroup) {
 		templates.DELETE("/:id", middleware.AuthCheck("model:write"), h.Delete)
 
 		templates.POST("/:id/test", middleware.AuthCheck("model:write"), h.Test)
+
+		templates.POST("/:id/say-hi", middleware.AuthCheck("model:write"), h.SayHi)
 		templates.GET("/:id/health", middleware.AuthCheck("model:read"), h.Health)
 		templates.GET("/:id/usage", middleware.AuthCheck("model:read"), h.Usage)
 	}
@@ -135,6 +137,16 @@ func (h *Handler) Delete(c *gin.Context) {
 // Test 手动连通性测试
 func (h *Handler) Test(c *gin.Context) {
 	result, err := h.svc.Test(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// SayHi 发送Hi消息测试 (真实对话调用, 验证模型能否正常回复)
+func (h *Handler) SayHi(c *gin.Context) {
+	result, err := h.svc.SayHi(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		response.Error(c, err)
 		return

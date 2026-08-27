@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { App, Button, Card, Col, Descriptions, Modal, Input, Popconfirm, Row, Space, Table, Tabs, Tag, Timeline, Typography } from 'antd';
 import { ArrowLeftOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
-import { workflowApi, type Workflow, type WorkflowExecution, type WorkflowVersion } from '@/api/workflow';
+import { workflowApi, type PrintOutputEntry, type Workflow, type WorkflowExecution, type WorkflowVersion } from '@/api/workflow';
 import { getErrorMessage } from '@/api/client';
 import { formatDateTime, timeAgo } from '@/utils/format';
 
@@ -128,6 +128,23 @@ export function WorkflowDetailPage() {
     },
     { title: '触发方式', dataIndex: 'trigger_type', width: 100, render: (v: string) => TRIGGER_MAP[v] ?? v },
     { title: '版本', dataIndex: 'workflow_version', width: 70, render: (v: number) => `v${v}` },
+    {
+      title: '工作流输出',
+      dataIndex: 'print_output',
+      width: 260,
+      render: (v?: PrintOutputEntry[] | null) =>
+        v && v.length > 0 ? (
+          <div>
+            {v.map((entry, i) => (
+              <div key={`${entry.node_id}-${i}`} style={{ color: entry.color || undefined, wordBreak: 'break-all' }}>
+                {entry.node_name}：{entry.message}
+              </div>
+            ))}
+          </div>
+        ) : (
+          '—'
+        ),
+    },
     {
       title: '开始时间',
       dataIndex: 'started_at',

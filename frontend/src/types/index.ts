@@ -433,6 +433,16 @@ export interface ModelTestResult {
   error?: string;
 }
 
+export interface ModelHiResult {
+  ok: boolean;
+  latency_ms: number;
+  content?: string;
+  model?: string;
+  finish_reason?: string;
+  total_tokens?: number;
+  error?: string;
+}
+
 export interface ModelHealthLog {
   id: string;
   model_id: string;

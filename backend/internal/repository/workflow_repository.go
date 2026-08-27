@@ -166,7 +166,7 @@ type WorkflowExecutionRepository interface {
 	Get(ctx context.Context, id string) (*model.WorkflowExecution, error)
 	Update(ctx context.Context, e *model.WorkflowExecution) error
 	// MarkFinished 终态迁移保护: 仅 running/waiting_approval 可迁移到终态
-	MarkFinished(ctx context.Context, id, status, errMsg string, output datatypes.JSON, finishedAt time.Time) (bool, error)
+	MarkFinished(ctx context.Context, id, status, errMsg string, output, printOutput datatypes.JSON, finishedAt time.Time) (bool, error)
 	List(ctx context.Context, filter ExecutionListFilter) ([]model.WorkflowExecution, int64, error)
 	// ListActive 列出未达终态的执行 (启动对账用)
 	ListActive(ctx context.Context) ([]model.WorkflowExecution, error)
@@ -199,7 +199,7 @@ func (r *workflowExecutionRepository) Update(ctx context.Context, e *model.Workf
 	return database.DB.WithContext(ctx).Save(e).Error
 }
 
-func (r *workflowExecutionRepository) MarkFinished(ctx context.Context, id, status, errMsg string, output datatypes.JSON, finishedAt time.Time) (bool, error) {
+func (r *workflowExecutionRepository) MarkFinished(ctx context.Context, id, status, errMsg string, output, printOutput datatypes.JSON, finishedAt time.Time) (bool, error) {
 	fields := map[string]interface{}{
 		"status":      status,
 		"error":       errMsg,
@@ -207,6 +207,9 @@ func (r *workflowExecutionRepository) MarkFinished(ctx context.Context, id, stat
 	}
 	if output != nil {
 		fields["output"] = output
+	}
+	if printOutput != nil {
+		fields["print_output"] = printOutput
 	}
 	res := database.DB.WithContext(ctx).Model(&model.WorkflowExecution{}).
 		Where("id = ? AND status IN ?", id, []string{model.ExecutionStatusRunning, model.ExecutionStatusWaitingApproval}).

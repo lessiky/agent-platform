@@ -1331,6 +1331,7 @@
 | `triggered_by` | string \| null | 触发人（webhook 为 null） |
 | `status` | string | `running` / `waiting_approval` / `success` / `failed` / `cancelled` |
 | `input` / `output` | object | 执行输入 / 输出（按节点 id 聚合各节点输出） |
+| `print_output` | array \| null | 打印输出汇总（配置了 print 节点时）：按 DAG 定义顺序、仅已成功节点，元素 `{node_id, node_name, message, color}`；无 print 节点或无成功输出时为 null |
 | `trace_id` | string | 追踪 ID |
 | `error` | string | 失败原因 |
 | `started_at` / `finished_at` | string | 起止时间 |
@@ -1608,6 +1609,6 @@
 | 执行状态 | `running` / `waiting_approval` / `success` / `failed` / `cancelled` |
 | 节点状态 | `pending` / `running` / `success` / `failed` / `skipped` / `waiting_approval` / `cancelled` |
 | 触发方式 | `manual` / `cron` / `webhook` |
-| 节点类型 | `agent` / `mcp_tool` / `http` / `delay` / `condition` |
+| 节点类型 | `agent` / `mcp_tool` / `http` / `delay` / `condition` / `print` |
 | 条件操作符 | `==` / `!=` / `>` / `<` / `>=` / `<=` / `contains` / `exists` |
 | 日志级别 | `info` / `warn` / `error` |

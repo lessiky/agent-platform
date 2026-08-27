@@ -5,7 +5,7 @@ import type { ApiEnvelope } from './client';
 
 export interface WorkflowNodeDef {
   id: string;
-  type: 'agent' | 'mcp_tool' | 'http' | 'delay' | 'condition';
+  type: 'agent' | 'mcp_tool' | 'http' | 'delay' | 'condition' | 'print';
   name?: string;
   config?: Record<string, unknown>;
   retry?: { max_attempts?: number; interval_seconds?: number; backoff?: 'fixed' | 'exponential' };
@@ -62,6 +62,13 @@ export interface AIGenerateResult {
 
 export type ExecutionStatus = 'running' | 'waiting_approval' | 'success' | 'failed' | 'cancelled';
 
+export interface PrintOutputEntry {
+  node_id: string;
+  node_name: string;
+  message: string;
+  color?: string;
+}
+
 export interface WorkflowExecution {
   id: string;
   workflow_id: string;
@@ -71,6 +78,7 @@ export interface WorkflowExecution {
   status: ExecutionStatus;
   input?: unknown;
   output?: unknown;
+  print_output?: PrintOutputEntry[] | null;
   trace_id: string;
   error?: string;
   started_at: string;

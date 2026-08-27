@@ -48,6 +48,7 @@ const (
 	NodeTypeHTTP      = "http"      // 外部 HTTP 调用
 	NodeTypeDelay     = "delay"     // 延迟等待
 	NodeTypeCondition = "condition" // 条件分支 (true/false 双出口)
+	NodeTypePrint     = "print"     // 打印输出 (执行历史按节点颜色展示, 汇总存于执行记录 print_output)
 )
 
 // Workflow 工作流定义 (PRD 5.5)
@@ -100,6 +101,7 @@ type WorkflowExecution struct {
 	Status          string         `gorm:"type:varchar(24);not null;default:'running';index" json:"status"`
 	Input           datatypes.JSON `gorm:"type:jsonb" json:"input"`
 	Output          datatypes.JSON `gorm:"type:jsonb" json:"output"`
+	PrintOutput     datatypes.JSON `gorm:"type:jsonb" json:"print_output"`
 	TraceID         string         `gorm:"type:varchar(32);index" json:"trace_id"`
 	Error           string         `gorm:"type:text" json:"error"`
 	StartedAt       time.Time      `json:"started_at"`
