@@ -294,7 +294,7 @@ docker compose -f infra/docker-compose.yml up -d --build backend  # 单独重建
 - 「添加节点」支持 5 类：`agent`（调用 Agent 对话）/ `mcp_tool`（调用 MCP 工具）/ `http`（外部 HTTP 请求）/ `delay`（延迟秒数）/ `condition`（条件分支）。
 - 拖拽布局、连线组网；连线到 condition 节点时选择「是 / 否」出口。
 - 选中节点 → 右侧「节点配置」面板填写该节点参数；每个节点支持重试（最大尝试次数 / 间隔 / 固定或指数退避）与超时（默认 300s）。
-- 变量引用：`$inputs.<path>`（执行输入）、`$nodes.<节点id>.<字段>`（上游输出）、`$execution.id`；路径支持 `a.b[0].c`。
+- 变量引用：`$inputs.<path>`（执行输入）、`$nodes.<节点id>.<字段>`（上游输出）、`$execution.id`；路径支持 `a.b[0].c`；JSON 串可用 `json(<引用>).<path>` 解析取 key（如 `json($nodes.n1.text).data.id`）。
 - 「保存」执行 DAG 校验（环检测 / 节点 / 边合法性，上限 100 节点 / 500 边）并生成版本快照；「保存并激活」保存后直接进入可触发状态。
 - 工具栏「定时调度」配置 cron 定时任务（详见下方「运行工作流」）；「触发」需工作流已激活。
 

@@ -607,6 +607,7 @@ function EditorInner() {
                 <div style={{ marginTop: 8, fontSize: 12 }}>
                   变量引用: <code>$inputs.x</code> · <code>$nodes.&lt;id&gt;.field</code> · <code>$execution.id</code>
                 </div>
+                <div style={{ marginTop: 4, fontSize: 12 }}>JSON 解析: <code>json($nodes.&lt;id&gt;.field).key</code> (解析上游节点返回的 JSON 串取指定 key)</div>
                 <div style={{ marginTop: 4, fontSize: 12 }}>连线条件节点出口时选择 是/否 分支。</div>
                 <div style={{ marginTop: 4, fontSize: 12 }}>选中节点后, 配置面板底部展示其支持的出参字段 (供下游节点引用)。</div>
               </div>

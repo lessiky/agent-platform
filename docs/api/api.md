@@ -1546,8 +1546,9 @@
 | `$inputs.<path>` | 执行输入（手动触发的 `input` / cron 的 `input` / webhook payload） |
 | `$nodes.<节点id>.<path>` | 上游节点输出字段 |
 | `$execution.id` | 当前执行 ID |
+| `json(<引用>).<path>` | 将引用值按 JSON 解析（JSON 串 / 对象 / 数组）后取路径，支持嵌套调用（如 `json(json($nodes.n1.text).inner).key`） |
 
-路径支持点号与数组下标（如 `$nodes.n1.reply`、`$inputs.items[0].name`）；整串引用保留原始类型，嵌入引用做文本格式化（如 `"hello $inputs.name"`）。
+路径支持点号与数组下标（如 `$nodes.n1.reply`、`$inputs.items[0].name`）；整串引用保留原始类型，嵌入引用做文本格式化（如 `"hello $inputs.name"`）。`json()` 的实参为变量引用（如 `$nodes.n1.text`）：值为 JSON 串时先解析再取路径，值本身已是对象/数组时直接取路径；解析失败或路径不存在时该引用按未命中处理（保留原文）。
 
 ---
 

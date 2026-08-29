@@ -350,8 +350,10 @@ type VarContext struct {
 //	$inputs / $inputs.a.b[0].c     工作流输入
 //	$nodes.<nodeID> / $nodes.<nodeID>.a.b   上游节点输出
 //	$execution.id                   当前执行 ID
+//	json(<引用>).a[0].b            将引用值按 JSON 解析后取路径 (如 json($nodes.n1.text).data.id)
 //
-// 整串为引用时保留原始类型; 嵌入字符串时按文本格式化
+// 整串为引用时保留原始类型; 嵌入字符串时按文本格式化。
+// 变量后可紧跟中文等非空白字符 (如 "检查$inputs.url访问是否正常"), 解析时按最长前缀回退匹配
 func ResolveVariables(value interface{}, ctx *VarContext) interface{} {
 	switch v := value.(type) {
 	case string:
@@ -374,45 +376,169 @@ func ResolveVariables(value interface{}, ctx *VarContext) interface{} {
 }
 
 func resolveString(raw string, ctx *VarContext) interface{} {
-	// 整串引用: 保留类型
-	if strings.HasPrefix(raw, "$") {
-		if value, ok := lookupRef(raw, ctx); ok {
-			return value
-		}
+	// 整串引用: 保留类型 ($ 引用, 或 json($nodes.n1.text).data 等函数调用)
+	if value, ok := lookupWholeRef(raw, ctx); ok {
+		return value
 	}
 	// 嵌入引用: 文本格式化
-	result := raw
+	var result strings.Builder
+	result.Grow(len(raw))
 	for start := 0; start < len(raw); {
-		if raw[start] != '$' {
-			start++
+		if raw[start] == '$' {
+			end := nextRefEnd(raw, start)
+			// 从最长前缀开始尝试: 变量后紧跟中文等字符时, 回退到能命中的边界
+			// (如 "检查$inputs.testurl访问是否正常" 解析出 $inputs.testurl)
+			replaced := false
+			for e := end; e > start+1; {
+				ref := raw[start:e]
+				// 截断处后随 ASCII 引用字符说明是更长路径的一部分, 不截取前缀 (避免 $inputs.a 误配 $inputs.a.b);
+				// ')' 是函数实参的结束符, 允许在函数整体未命中时回退解析内层引用
+				if value, ok := lookupRef(ref, ctx); ok && (e == end || raw[e] >= 0x80 || raw[e] == ')') {
+					result.WriteString(formatValue(value))
+					start = e
+					replaced = true
+					break
+				}
+				e = prevRuneStart(raw, start, e)
+			}
+			if !replaced {
+				result.WriteByte(raw[start])
+				start++
+			}
 			continue
 		}
-		end := nextRefEnd(raw, start)
-		ref := raw[start:end]
-		if value, ok := lookupRef(ref, ctx); ok {
-			result = strings.Replace(result, ref, formatValue(value), 1)
-			start = end
-		} else {
-			start++
+		// 函数调用引用: json($nodes.n1.text).data (函数名以 ASCII 字母开头)
+		if isLetter(raw[start]) {
+			if consumed, ok := resolveFuncCall(raw[start:], &result, ctx); ok {
+				start += consumed
+				continue
+			}
 		}
+		result.WriteByte(raw[start])
+		start++
 	}
-	return result
+	return result.String()
 }
 
-// nextRefEnd 从 start (指向 $) 找到引用结束位置: 到空白或字符串结尾
+// lookupWholeRef 整串引用: $ 引用或函数调用 (json($...)); 非引用文本返回 false
+func lookupWholeRef(raw string, ctx *VarContext) (interface{}, bool) {
+	if !strings.HasPrefix(raw, "$") {
+		if _, _, _, ok := splitFunctionCall(raw); !ok {
+			return nil, false
+		}
+	}
+	return lookupRef(raw, ctx)
+}
+
+// resolveFuncCall 尝试把 base (以字母开头) 解析为函数调用引用 <func>(<引用>)<路径>:
+// 命中时写入格式化值并返回消耗长度, 未命中返回 0/false
+func resolveFuncCall(base string, result *strings.Builder, ctx *VarContext) (int, bool) {
+	openIdx := strings.IndexByte(base, '(')
+	if openIdx <= 0 || !isFuncName(base[:openIdx]) {
+		return 0, false
+	}
+	parenEnd := funcCallParenEnd(base)
+	if parenEnd < 0 {
+		return 0, false
+	}
+	if tail := base[parenEnd+1:]; tail != "" && !strings.HasPrefix(tail, ".") && !strings.HasPrefix(tail, "[") {
+		return 0, false
+	}
+	// 尾随路径的结束边界: 空白/引号/字符串结尾
+	tailEnd := len(base)
+	for i := parenEnd + 1; i < len(base); i++ {
+		if base[i] == ' ' || base[i] == '\t' || base[i] == '"' || base[i] == '\'' {
+			tailEnd = i
+			break
+		}
+	}
+	// 从最长路径回退: 路径后紧跟中文等字符时回退到能命中的边界
+	for e := tailEnd; ; e = prevRuneStart(base, 0, e) {
+		candidate := base[:e]
+		if _, _, _, ok := splitFunctionCall(candidate); ok {
+			// 截断处后随 ASCII 引用字符说明是更长路径的一部分, 不截取前缀; ')' 为用户自定义包裹符号, 允许命中
+			if value, ok := lookupRef(candidate, ctx); ok && (e == tailEnd || base[e] >= 0x80 || base[e] == ')') {
+				result.WriteString(formatValue(value))
+				return e, true
+			}
+		}
+		if e <= parenEnd+1 {
+			break
+		}
+	}
+	return 0, false
+}
+
+// funcCallParenEnd 返回 base 中第一个 '(' (函数实参起点) 的配对右括号下标, 未闭合返回 -1
+func funcCallParenEnd(base string) int {
+	depth := 0
+	for i := 0; i < len(base); i++ {
+		switch base[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// isLetter 是否 ASCII 字母 (函数名以字母开头)
+func isLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// nextRefEnd 从 start (指向 $) 找到引用结束位置: 到空白或字符串结尾 (函数调用括号内允许空白)
 func nextRefEnd(raw string, start int) int {
+	depth := 0
 	for i := start; i < len(raw); i++ {
-		if raw[i] == ' ' || raw[i] == '\t' || raw[i] == '"' || raw[i] == '\'' {
+		switch raw[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		}
+		if depth == 0 && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '"' || raw[i] == '\'') {
 			return i
 		}
 	}
 	return len(raw)
 }
 
+// prevRuneStart 返回 raw[start:e] 中最后一个 rune 的起始下标 (按字符回退引用边界)
+func prevRuneStart(raw string, start, e int) int {
+	for i := e - 1; i >= start; i-- {
+		if raw[i] < 0x80 || raw[i] >= 0xC0 {
+			return i
+		}
+	}
+	return start
+}
+
 func lookupRef(ref string, ctx *VarContext) (interface{}, bool) {
 	rest := strings.TrimPrefix(ref, "$")
 	if rest == "" {
 		return nil, false
+	}
+	// 函数调用: <func>(<引用>)<路径>, 如 json($nodes.n1.text).data[0]; 实参可为嵌套函数调用
+	if name, arg, tail, isFunc := splitFunctionCall(rest); isFunc {
+		value, ok := lookupRef(arg, ctx)
+		if !ok {
+			return nil, false
+		}
+		parsed, ok := applyFunc(name, value)
+		if !ok {
+			return nil, false
+		}
+		if tail == "" {
+			return parsed, true
+		}
+		return walkPath(parsed, tail)
 	}
 	parts := strings.SplitN(rest, ".", 2)
 	root := parts[0]
@@ -459,6 +585,89 @@ func lookupRef(ref string, ctx *VarContext) (interface{}, bool) {
 	return walkPath(target, parts[1])
 }
 
+// splitFunctionCall 拆分函数调用 <name>(<arg>)<tail>:
+// 返回函数名、括号内原始实参 (已 trim)、尾随路径 (空, 或以 . / [ 开头)
+func splitFunctionCall(rest string) (name, arg, tail string, ok bool) {
+	openIdx := strings.IndexByte(rest, '(')
+	if openIdx <= 0 {
+		return "", "", "", false
+	}
+	name = rest[:openIdx]
+	if !isFuncName(name) {
+		return "", "", "", false
+	}
+	depth := 0
+	for i := openIdx; i < len(rest); i++ {
+		switch rest[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				tail = rest[i+1:]
+				if tail != "" && !strings.HasPrefix(tail, ".") && !strings.HasPrefix(tail, "[") {
+					return "", "", "", false
+				}
+				return name, strings.TrimSpace(rest[openIdx+1 : i]), tail, true
+			}
+		}
+	}
+	return "", "", "", false
+}
+
+// isFuncName 函数名是否合法 (字母/数字/下划线)
+func isFuncName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// applyFunc 内置函数注册表: 对已解析的引用值做转换, ok=false 表示函数不存在或执行失败 (引用按未命中处理)
+func applyFunc(name string, value interface{}) (interface{}, bool) {
+	switch name {
+	case "json":
+		return jsonParseValue(value)
+	}
+	return nil, false
+}
+
+// jsonParseValue json() 函数: 将值按 JSON 解析后返回 (对象/数组/标量)
+//   - 字符串: 按 JSON 解析, 解析失败 ok=false
+//   - map/slice: 已是 JSON 结构, 原样返回
+//   - 其他标量: 序列化后重新解析 (兼容数字/布尔)
+func jsonParseValue(value interface{}) (interface{}, bool) {
+	if s, ok := value.(string); ok {
+		raw := strings.TrimSpace(s)
+		if raw == "" {
+			return nil, false
+		}
+		var out interface{}
+		if json.Unmarshal([]byte(raw), &out) != nil {
+			return nil, false
+		}
+		return out, true
+	}
+	if _, isMap := value.(map[string]interface{}); isMap {
+		return value, true
+	}
+	if _, isArr := value.([]interface{}); isArr {
+		return value, true
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	var out interface{}
+	if json.Unmarshal(raw, &out) != nil {
+		return nil, false
+	}
+	return out, true
+}
+
 // walkPath 按 a.b[0].c 路径取值
 func walkPath(target interface{}, path string) (interface{}, bool) {
 	current := target
@@ -467,6 +676,9 @@ func walkPath(target interface{}, path string) (interface{}, bool) {
 			continue
 		}
 		for {
+			if segment == "" {
+				break
+			}
 			if idx := strings.Index(segment, "["); idx >= 0 {
 				closeIdx := strings.Index(segment[idx:], "]")
 				if closeIdx < 0 {
