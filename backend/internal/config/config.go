@@ -15,6 +15,7 @@ type Config struct {
 	JWT      JWTConfig
 	MCP      MCPConfig
 	Model    ModelConfig
+	Memory   MemoryConfig
 }
 
 type ServerConfig struct {
@@ -55,6 +56,34 @@ type ModelConfig struct {
 	CheckTimeout time.Duration `env:"MODEL_CHECK_TIMEOUT" envDefault:"5s"`
 	// ChatTimeout 单次对话调用超时 (LLM 生成耗时较长, 需长于探测超时)
 	ChatTimeout time.Duration `env:"MODEL_CHAT_TIMEOUT" envDefault:"120s"`
+}
+
+// MemoryConfig 记忆模块配置 (M10.1 检索注入 / M10.2 自动抽取 + 滚动摘要 / M10.3 语义检索)
+type MemoryConfig struct {
+	// Enabled 总开关 (false 时不注入记忆, 也不触发抽取/摘要, 对话链路行为与 M10 之前一致)
+	Enabled bool `env:"MEMORY_ENABLED" envDefault:"true"`
+	// MaxInject 每轮注入记忆条数上限
+	MaxInject int `env:"MEMORY_MAX_INJECT" envDefault:"10"`
+	// CharBudget 记忆段内容字符预算 (不含段头声明)
+	CharBudget int `env:"MEMORY_CHAR_BUDGET" envDefault:"800"`
+	// RetrievalTimeout 检索超时, 超时跳过注入 (记忆故障不阻断对话)
+	RetrievalTimeout time.Duration `env:"MEMORY_RETRIEVAL_TIMEOUT" envDefault:"500ms"`
+	// CacheTTL 活跃记忆集进程内缓存 TTL
+	CacheTTL time.Duration `env:"MEMORY_CACHE_TTL" envDefault:"60s"`
+	// ExtractEnabled 自动抽取开关 (M10.2, false 时 turn 结束不触发 LLM 抽取, 不影响注入)
+	ExtractEnabled bool `env:"MEMORY_EXTRACT_ENABLED" envDefault:"true"`
+	// ExtractMinTurns 同 session 两次抽取的最小轮次间隔 (M10.2 限流)
+	ExtractMinTurns int `env:"MEMORY_EXTRACT_MIN_TURNS" envDefault:"5"`
+	// ExtractModel 抽取/摘要用 ModelTemplate 名称 (M10.2, 空 = Agent 当前模型)
+	ExtractModel string `env:"MEMORY_EXTRACT_MODEL"`
+	// MaxActivePerScope 每 (agent, user) / Agent 级活跃记忆上限 (M10.2, 超限自动归档最低分)
+	MaxActivePerScope int `env:"MEMORY_MAX_ACTIVE_PER_SCOPE" envDefault:"500"`
+	// SessionSummaryThreshold 会话滚动摘要触发阈值 (M10.2, 会话 user/assistant 消息数)
+	SessionSummaryThreshold int `env:"MEMORY_SESSION_SUMMARY_THRESHOLD" envDefault:"40"`
+	// EmbedModel 语义检索 (M10.3) 向量专用 ModelTemplate 名称; 空 = 语义检索整体不生效 (纯关键词检索)
+	EmbedModel string `env:"MEMORY_EMBED_MODEL"`
+	// EmbedTimeout 向量计算 (查询/写入/回填) 单次超时
+	EmbedTimeout time.Duration `env:"MEMORY_EMBED_TIMEOUT" envDefault:"10s"`
 }
 
 func Load(envFile string) (*Config, error) {

@@ -682,6 +682,8 @@
 
 - **说明**：调用需审核工具时不立即执行，生成审核请求（`source=chat`），`reply` 照常返回；审批通过后工具结果自动回填（不重跑模型轮）。
 
+- **长期记忆（M10）**：`MEMORY_ENABLED=true`（默认）时，系统提示词自动附加“长期记忆”段（当前用户 user 级 + Agent 级 active 记忆，按记忆评分取 Top N）；本轮注入的记忆 ID 记录在 assistant 消息 `execution_meta.memory_injected`（数组，可追溯）。会话已生成滚动摘要（`summary` 非空）时，摘要作为一条 user 消息（前缀“以下是更早对话的摘要：”）注入在历史消息之前。`MEMORY_ENABLED=false` 时完全关闭（不注入、不抽取、不更新摘要），行为与 M10 之前一致。
+
 ### 4.25 会话列表
 
 - **接口**：`GET /api/v1/agents/:id/sessions`
@@ -698,6 +700,8 @@
 
 `ChatMessage` 字段：`{id, session_id, role(user/assistant/tool), content, execution_id, execution_meta(JSON), created_at}`；`execution_meta` 含 `execution_id`/`model_name`/`total_tokens`/`latency_ms`/`mcp_calls`/`skill_calls`/`pending_approvals`。
 
+`ChatSession` 含 `summary` 字段（滚动摘要，M10.2）：对话消息数超过阈值（`MEMORY_SESSION_SUMMARY_THRESHOLD`，默认 40）后由异步管线生成/刷新（≤300 字），空 = 未触发；assistant 消息 `execution_meta` 另含 `memory_injected`（记忆注入 ID 数组，M10）。
+
 ### 4.27 删除会话
 
 - **接口**：`DELETE /api/v1/agents/:id/sessions/:sid`
@@ -711,6 +715,62 @@
 - **入参**（body）：`{ "title": "新会话名" }`（非空，≤ 128 字符，首尾空白去除）
 - **出参**：`200`，`data` 为更新后的 `ChatSession`；会话不属于该 Agent 时 `404`
 ---
+
+### 4.29 记忆列表
+
+- **用途**：分页列出 Agent 的长期记忆 (M10)。
+- **接口**：`GET /api/v1/agents/:id/memories`
+- **权限**：`agent:read`
+- **入参**（query）：
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+| ---- | ---- | ---- | ---- | ---- |
+| `scope` | string | 否 | `mine` | `mine`=当前用户 user 级 + Agent 级；`agent`=仅 Agent 级；`all`=全部属主（仅 admin，非 admin 返回 403） |
+| `kind` | string | 否 | - | `preference` / `fact` / `decision` / `event` |
+| `status` | string | 否 | - | `active` / `archived` |
+| `page` / `size` | int | 否 | 1 / 20 | 分页 |
+
+- **出参**：`200`，`data`：`{items: Memory[], total, page, page_size}`。
+- **Memory 字段**：`{id, agent_id, user_id, kind, content, source, status, access_count, last_accessed_at, created_at, updated_at}`；`user_id` 为 null 表示 Agent 级全局记忆；`source` 为 `user_explicit`（显式添加）/ `llm_extracted`（对话自动抽取，M10.2）。
+
+### 4.30 记忆详情
+
+- **接口**：`GET /api/v1/agents/:id/memories/:mid`
+- **权限**：`agent:read`
+- **属主规则**：user 级记忆仅属主与 admin 可见；非属主访问他人 user 级记忆返回 `404`（不泄露存在性）；Agent 级记忆对任何持 `agent:read` 的用户可见。
+- **出参**：`200`，`data` 为 `Memory`；不属于该 Agent 时 `404`。
+
+### 4.31 创建记忆
+
+- **接口**：`POST /api/v1/agents/:id/memories`
+- **权限**：`agent:write`
+- **入参**（body）：
+
+| 字段 | 类型 | 必填 | 说明 |
+| ---- | ---- | ---- | ---- |
+| `content` | string | 是 | 记忆内容（≤500 字符，首尾空白去除） |
+| `kind` | string | 否 | 默认 `fact`，取值见 4.29 |
+| `scope` | string | 否 | `user`（默认，属主=当前用户）/ `agent`（Agent 级全局） |
+
+- **出参**：`201`，`data` 为创建的 `Memory`。
+- **说明**：创建写入审计日志（`memory.created`）。
+
+### 4.32 更新记忆
+
+- **接口**：`PATCH /api/v1/agents/:id/memories/:mid`
+- **权限**：`agent:write`
+- **入参**（body，字段缺省 = 不修改）：`{content?, kind?, status?}`（`status` 取 `active` / `archived`，停用即归档，不再参与检索注入）
+- **属主规则**：user 级记忆仅属主与 admin 可更新（非属主 `403`）；Agent 级记忆任何持 `agent:write` 的用户可更新。
+- **出参**：`200`，`data` 为更新后的 `Memory`。
+- **说明**：更新写入审计日志（`memory.updated`）。
+
+### 4.33 删除记忆
+
+- **接口**：`DELETE /api/v1/agents/:id/memories/:mid`
+- **权限**：`agent:write`
+- **属主规则**：同 4.32（user 级仅属主/admin）。
+- **出参**：`200`，`data`：`{ "deleted": true }`。
+- **说明**：物理删除（不进归档）；写入审计日志（`memory.deleted`）。
 
 ## 5. 技能管理
 
@@ -1566,12 +1626,16 @@
 | ---- | ---- | ---- |
 | `name` | string | 平台名（默认 `Agent 管理平台`） |
 | `icon` | string | 平台图标（base64 data URL: `data:image/png|jpeg|svg+xml|webp|gif;base64,...`）；空串 = 使用内置默认图标 |
+| `memory_embed_model` | string | 记忆语义检索（M10.3）向量专用 ModelTemplate 名称；空串 = 跟随环境变量 `MEMORY_EMBED_MODEL` |
+| `memory_embed_model_effective` | string | 当前生效的向量模型名（平台设置优先，空时回退环境变量）；空 = 语义检索不生效（纯关键词检索） |
+| `memory_extract_model` | string | 记忆抽取/会话摘要 (M10.2) 用 ModelTemplate 名称；空串 = 跟随环境变量 `MEMORY_EXTRACT_MODEL` (再空 = Agent 当前模型) |
+| `memory_extract_model_effective` | string | 当前生效的抽取/摘要模型名（平台设置优先，空时回退环境变量）；空 = 使用 Agent 各自配置的模型 |
 | `updated_at` | string | 最近更新时间 `YYYY-MM-DD HH:mm:ss`（从未更新时省略） |
 
 ```json
 {
   "code": "success", "message": "ok",
-  "data": { "name": "Agent 管理平台", "icon": "data:image/png;base64,iVBORw0KGgo=", "updated_at": "2026-08-24 10:00:00" }
+  "data": { "name": "Agent 管理平台", "icon": "data:image/png;base64,iVBORw0KGgo=", "memory_embed_model": "text-embed-3", "memory_embed_model_effective": "text-embed-3", "memory_extract_model": "extract-gpt", "memory_extract_model_effective": "extract-gpt", "updated_at": "2026-08-24 10:00:00" }
 }
 ```
 
@@ -1585,9 +1649,11 @@
 | ---- | ---- | ---- | ---- | ---- |
 | `name` | string | 是 | 1-64 个字符 | 平台名（首尾空白自动去除） |
 | `icon` | string \| null | 否 | base64 data URL, 原图 ≤ 1MB | `null` = 不修改；空串 = 清除自定义图标；其余须为 PNG / JPG / SVG / WebP / GIF 的 data URL |
+| `memory_embed_model` | string \| null | 否 | ≤ 64 字符 | 向量专用 ModelTemplate 名称（首尾空白自动去除）。`null` = 不修改；空串 = 跟随环境变量 `MEMORY_EMBED_MODEL`；其余 = 使用该名称。保存后**即时生效，无需重启**（运行时优先于环境变量；模板不存在或调用失败时自动降级纯关键词检索） |
+| `memory_extract_model` | string \| null | 否 | ≤ 64 字符 | 记忆抽取/会话摘要用 ModelTemplate 名称（首尾空白自动去除）。`null` = 不修改；空串 = 跟随环境变量 `MEMORY_EXTRACT_MODEL`（再空 = Agent 当前模型）；其余 = 使用该名称。保存后**即时生效，无需重启**（运行时优先于环境变量；模板不存在或不可用时回落 Agent 路由） |
 
 - **出参**：`200`，`data` 为更新后的 `PlatformInfo`。
-- 变更写入审计日志（`action=platform.update`, `resource=platform`, detail 含名称前后值与图标是否变更）。
+- 变更写入审计日志（`action=platform.update`, `resource=platform`, detail 含名称前后值、图标是否变更、向量/抽取模型前后值）。
 
 ---
 

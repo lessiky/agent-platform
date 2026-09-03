@@ -561,6 +561,7 @@ export interface ChatSession {
   title: string;
   user_id: string | null;
   status: 'active' | 'archived';
+  summary?: string; // 滚动摘要 (M10.2), 空 = 未触发
   last_message_at: string;
   created_at: string;
   updated_at: string;
@@ -612,6 +613,32 @@ export interface ChatResult {
   mcp_calls?: ChatMCPCall[];
   skill_calls?: ChatSkillCall[]; // 本轮加载的技能 (M9, 与 execution_meta.skill_calls 同构)
   pending_approvals?: ChatPendingApproval[];
+}
+
+// ---------- 记忆 (M10) ----------
+export type MemoryKind = 'preference' | 'fact' | 'decision' | 'event';
+export type MemorySource = 'user_explicit' | 'llm_extracted';
+export type MemoryStatus = 'active' | 'archived';
+
+export interface Memory {
+  id: string;
+  agent_id: string;
+  user_id: string | null; // null = Agent 级全局记忆
+  kind: MemoryKind;
+  content: string;
+  source: MemorySource;
+  status: MemoryStatus;
+  access_count: number;
+  last_accessed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemoryListResult {
+  items: Memory[];
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 // ---------- 技能 (M9) ----------
@@ -675,8 +702,14 @@ export interface BoundSkillView {
 
 // ---------- 平台设置 ----------
 // 平台名 + 平台图标 (icon 为 base64 data URL, 空串 = 使用内置默认图标)
+// + 记忆语义检索向量模型 (memory_embed_model 空串 = 跟随 MEMORY_EMBED_MODEL 环境变量)
+// + 记忆抽取/摘要模型 (memory_extract_model 空串 = 跟随 MEMORY_EXTRACT_MODEL 环境变量, 再空 = Agent 当前模型)
 export interface PlatformSettings {
   name: string;
   icon: string;
+  memory_embed_model?: string;
+  memory_embed_model_effective?: string;
+  memory_extract_model?: string;
+  memory_extract_model_effective?: string;
   updated_at?: string;
 }

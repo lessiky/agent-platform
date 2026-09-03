@@ -16,6 +16,8 @@ import type {
   CreateAgentRequest,
   DashboardData,
   LogQuery,
+  Memory,
+  MemoryListResult,
   Paginated,
 } from '@/types';
 
@@ -96,6 +98,22 @@ export const agentApi = {
 
   deleteSession: (id: string, sessionId: string) =>
     apiClient.delete<ApiEnvelope<{ deleted: boolean }>>(`agents/${id}/sessions/${sessionId}`),
+
+  // 记忆 (M10): 列表/详情/显式添加/更新/删除 (scope=mine 默认, agent 仅 Agent 级, all 仅 admin)
+  listMemories: (id: string, params?: { kind?: string; status?: string; scope?: string; page?: number; size?: number }) =>
+    apiClient.get<ApiEnvelope<MemoryListResult>>(`agents/${id}/memories`, { params }),
+
+  getMemory: (id: string, memoryId: string) =>
+    apiClient.get<ApiEnvelope<Memory>>(`agents/${id}/memories/${memoryId}`),
+
+  createMemory: (id: string, data: { content: string; kind?: string; scope?: string }) =>
+    apiClient.post<ApiEnvelope<Memory>>(`agents/${id}/memories`, data),
+
+  updateMemory: (id: string, memoryId: string, data: { content?: string; kind?: string; status?: string }) =>
+    apiClient.patch<ApiEnvelope<Memory>>(`agents/${id}/memories/${memoryId}`, data),
+
+  deleteMemory: (id: string, memoryId: string) =>
+    apiClient.delete<ApiEnvelope<{ deleted: boolean }>>(`agents/${id}/memories/${memoryId}`),
 };
 
 // ---------------------------------------------------------------------------
@@ -106,6 +124,7 @@ export const agentApi = {
 export type ChatStreamEventType =
   | 'turn_start'
   | 'model_round'
+  | 'thinking_delta'
   | 'tool_start'
   | 'tool_end'
   | 'final'
@@ -125,7 +144,7 @@ export interface ChatStreamHandlers {
 // error 事件 / 非 2xx / 中断时 reject (中断为 DOMException AbortError)
 export async function chatStream(
   id: string,
-  body: { session_id?: string; message: string },
+  body: { session_id?: string; message: string; show_thinking?: boolean },
   handlers: ChatStreamHandlers = {},
 ): Promise<ChatResult> {
   const base = import.meta.env.VITE_API_BASE_URL || '/api/v1';

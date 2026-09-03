@@ -111,6 +111,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to init model credential cipher: %v", err)
 	}
+	// M10: 模型模板名的运行时来源 (平台设置页优先, 对应环境变量兜底; 免重启切换)
+	// 向量 (M10.3): 空 = 语义检索不生效; 抽取/摘要 (M10.2): 空 = Agent 当前模型
+	embedModelSource := service.NewMutableTemplateSource(cfg.Memory.EmbedModel)
+	extractModelSource := service.NewMutableTemplateSource(cfg.Memory.ExtractModel)
 	modelService := service.NewModelTemplateService(
 		repository.NewModelTemplateRepository(),
 		repository.NewModelQuotaRepository(),
@@ -120,6 +124,8 @@ func main() {
 		modelCipher,
 		cfg.Model.CheckTimeout,
 		cfg.Model.ChatTimeout,
+		cfg.Memory.EmbedTimeout,
+		embedModelSource,
 	)
 	// 运行时模拟流量中, Agent 调用按优先级路由到模型并消费配额 (6.5)
 	agentRuntime.SetModelRouter(modelService)
@@ -140,6 +146,34 @@ func main() {
 		service.DefaultSkillLimits(),
 	)
 
+	// 5.700 语义检索向量组件 (M10.3): 向量模型名按运行时来源实时判定 (平台设置页可免重启启停/切换; 空 = 纯关键词检索)
+	memEmbedder := service.NewMemoryEmbedder(modelService, embedModelSource, cfg.Memory.EmbedTimeout)
+	// 5.701 初始化记忆域 (M10.1 检索注入 / M10.3 语义检索): 对话链依赖, 先于对话域创建
+	memService := service.NewMemoryService(
+		repository.NewMemoryRepository(),
+		repository.NewAuditLogRepository(),
+		cfg.Memory.Enabled,
+		cfg.Memory.MaxInject,
+		cfg.Memory.CharBudget,
+		cfg.Memory.RetrievalTimeout,
+		cfg.Memory.CacheTTL,
+		memEmbedder,
+	)
+	// 5.702 记忆域异步管线 (M10.2): turn 结束自动抽取 + 会话滚动摘要 (对话链依赖, 先于对话域创建)
+	memExtractor := service.NewMemoryExtractor(
+		repository.NewChatSessionRepository(),
+		repository.NewChatMessageRepository(),
+		repository.NewMemoryRepository(),
+		memService,
+		modelService,
+		repository.NewAgentLogRepository(),
+		cfg.Memory.Enabled,
+		cfg.Memory.ExtractEnabled,
+		cfg.Memory.ExtractMinTurns,
+		extractModelSource,
+		cfg.Memory.MaxActivePerScope,
+		cfg.Memory.SessionSummaryThreshold,
+	)
 	// 5.7 初始化对话域 (M2.5): 对话执行链 (模型调用 + 工具调用审核联动) + 会话持久化
 	chatService := service.NewChatService(
 		repository.NewAgentRepository(),
@@ -150,6 +184,8 @@ func main() {
 		modelService,
 		repository.NewAgentCallStatRepository(),
 		skillService,
+		memService,
+		memExtractor,
 		repository.NewAgentExecutionRepository(),
 		cfg.Model.ChatTimeout,
 		cfg.MCP.CheckTimeout,
@@ -173,6 +209,7 @@ func main() {
 		repository.NewSkillRepository(),
 		repository.NewChatSessionRepository(),
 		chatService,
+		repository.NewMemoryRepository(),
 		repository.NewToolApprovalRepository(),
 		modelService,
 	)
@@ -238,11 +275,22 @@ func main() {
 	workflowHandler := workflow.NewHandler(workflowService, workflowAIGenerator)
 	skillHandler := skill.NewHandler(skillService)
 	overviewHandler := overview.NewHandler(service.NewOverviewService(repository.NewOverviewRepository()))
-	// 5.8 初始化平台设置域: 平台名/图标 (登录页与侧边导航展示)
-	platformHandler := platform.NewHandler(service.NewPlatformService(
+	// 5.8 初始化平台设置域: 平台名/图标 + 记忆向量/抽取模型 (运行时可改, 免重启)
+	platformService := service.NewPlatformService(
 		repository.NewPlatformSettingsRepository(),
 		repository.NewAuditLogRepository(),
-	))
+		service.PlatformModelSources{
+			Embed:       embedModelSource,
+			EmbedSink:   embedModelSource,
+			Extract:     extractModelSource,
+			ExtractSink: extractModelSource,
+		},
+	)
+	// 启动时把库中已保存的向量/抽取模型名同步进运行时来源 (重启后无需等待首次设置请求即生效)
+	if err := platformService.SyncModelSettings(context.Background()); err != nil {
+		log.Printf("platform: sync model settings failed: %v (fallback to MEMORY_*_MODEL env)", err)
+	}
+	platformHandler := platform.NewHandler(platformService)
 	// 5.9 初始化 RBAC 管理域 (M1 遗留落地): 用户/角色/权限管理 + /auth/me
 	rbacService := service.NewRBACService(
 		repository.NewUserRepository(),
@@ -250,7 +298,7 @@ func main() {
 		repository.NewAuditLogRepository(),
 	)
 	rbacHandler := rbac.NewHandler(rbacService)
-	router := setupRouter(cfg, agent.NewHandler(agentService, chatService), mcp.NewHandler(mcpService, approvalService), model.NewHandler(modelService), approvalHandler, workflowHandler, skillHandler, rbacHandler, overviewHandler, platformHandler)
+	router := setupRouter(cfg, agent.NewHandler(agentService, chatService, memService), mcp.NewHandler(mcpService, approvalService), model.NewHandler(modelService), approvalHandler, workflowHandler, skillHandler, rbacHandler, overviewHandler, platformHandler)
 
 	// 7. 启动服务 (支持优雅退出)
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

@@ -34,6 +34,8 @@ const (
 type ChatRequest struct {
 	SessionID *string `json:"session_id"`
 	Message   string  `json:"message" binding:"required,max=8192"`
+	// ShowThinking 显示思考过程: 模型调用走流式, 思考增量经 thinking_delta 事件实时推送并落库 execution_meta.thinking
+	ShowThinking bool `json:"show_thinking"`
 }
 
 // InvokeRequest API Key 外部调用请求 (/invoke): 与对话同一执行链路, 返回模型应答
@@ -125,6 +127,8 @@ type chatService struct {
 	modelSvc ModelTemplateService
 	stats    repository.AgentCallStatRepository
 	skills   SkillService
+	memSvc   MemoryService // 长期记忆注入 (M10.1), 可为 nil (不注入)
+	memExtract *MemoryExtractor // turn 结束异步管线: 自动抽取 + 滚动摘要 (M10.2), 可为 nil
 
 	executions     repository.AgentExecutionRepository // 执行任务 (/invoke 202 异步化)
 	modelChatTime  time.Duration                       // 模型单次调用超时 (执行预算计算)
@@ -145,6 +149,8 @@ func NewChatService(
 	modelSvc ModelTemplateService,
 	stats repository.AgentCallStatRepository,
 	skills SkillService,
+	mem MemoryService,
+	memExtract *MemoryExtractor,
 	executions repository.AgentExecutionRepository,
 	modelChatTimeout, mcpCallTimeout time.Duration,
 ) ChatService {
@@ -169,6 +175,8 @@ func NewChatService(
 		modelSvc:       modelSvc,
 		stats:          stats,
 		skills:         skills,
+		memSvc:         mem,
+		memExtract:     memExtract,
 		executions:     executions,
 		modelChatTime:  modelChatTimeout,
 		mcpCallTime:    mcpCallTimeout,
@@ -345,7 +353,7 @@ func (s *chatService) Chat(ctx context.Context, agentID string, req ChatRequest,
 		}
 	}
 
-	return s.runTurn(ctx, agent, &agentCfg, session, message, "chat", model.ApprovalSourceChat, nil)
+	return s.runTurn(ctx, agent, &agentCfg, session, message, "chat", model.ApprovalSourceChat, false, nil)
 }
 
 // ChatStream 对话 (SSE 流式版, 2026-08-24):
@@ -393,7 +401,7 @@ func (s *chatService) ChatStream(ctx context.Context, agentID string, req ChatRe
 	tracker := &executionTracker{sink: sink}
 	go func() {
 		defer sink.close()
-		if _, err := s.runTurn(ctx, agent, &agentCfg, session, message, "chat", model.ApprovalSourceChat, tracker); err != nil {
+		if _, err := s.runTurn(ctx, agent, &agentCfg, session, message, "chat", model.ApprovalSourceChat, req.ShowThinking, tracker); err != nil {
 			tracker.failed(err)
 		}
 	}()
@@ -443,7 +451,7 @@ func (s *chatService) Invoke(ctx context.Context, agentID string, req InvokeRequ
 		}
 	}
 
-	return s.runTurn(ctx, agent, &agentCfg, session, message, "api invoke", model.ApprovalSourceAPIInvoke, nil)
+	return s.runTurn(ctx, agent, &agentCfg, session, message, "api invoke", model.ApprovalSourceAPIInvoke, false, nil)
 }
 
 // invokeBudget 计算一次执行任务的整体 deadline 预算 (单轮上限 = 模型调用 + 单次工具调用, 按轮数*2 放大并留底)
@@ -535,7 +543,7 @@ func (s *chatService) runAsyncExecution(ctx context.Context, agent *model.Agent,
 	}()
 
 	tracker := &executionTracker{id: execution.ID, repo: s.executions}
-	result, err := s.runTurn(ctx, agent, agentCfg, session, message, "api invoke", model.ApprovalSourceAPIInvoke, tracker)
+	result, err := s.runTurn(ctx, agent, agentCfg, session, message, "api invoke", model.ApprovalSourceAPIInvoke, false, tracker)
 	if err != nil {
 		switch {
 		case stderrors.Is(ctx.Err(), context.DeadlineExceeded):
@@ -815,6 +823,17 @@ func (t *executionTracker) failed(err error) {
 	t.sink.publish(ChatStreamEvent{Type: "error", Data: map[string]string{"message": err.Error()}})
 }
 
+// thinkingDelta 模型思考增量 (SSE, 显示思考过程时实时推送)
+func (t *executionTracker) thinkingDelta(round int, delta string) {
+	if t == nil || t.sink == nil || delta == "" {
+		return
+	}
+	t.sink.publish(ChatStreamEvent{Type: "thinking_delta", Data: map[string]interface{}{
+		"round": round,
+		"delta": delta,
+	}})
+}
+
 // toolStage 工具调用阶段标识 (tool:<mcp名>/<工具名>; 内置工具无 MCP 前缀)
 func toolStage(toolIndex map[string]toolRef, name string) string {
 	if ref, ok := toolIndex[name]; ok && ref.MCPName != "" {
@@ -832,7 +851,7 @@ func toolMCPName(toolIndex map[string]toolRef, name string) string {
 }
 
 // ChatStreamEvent 对话流式事件 (SSE, /chat/stream): 按执行链推进顺序推送
-// type: turn_start (开始) / model_round (模型调用开始) / tool_start (工具调用开始) /
+// type: turn_start (开始) / model_round (模型调用开始) / thinking_delta (模型思考增量) / tool_start (工具调用开始) /
 //
 //	tool_end (工具调用结束) / final (最终结果, data 与同步端点 data 同构) / error (失败)
 type ChatStreamEvent struct {
@@ -873,7 +892,7 @@ func (s *chatEventSink) close() {
 // runTurn 执行一轮对话 (Chat 与 API Key /invoke 共用):
 // 组装上下文 -> 模型调用 (路由/故障转移/配额) -> (工具调用轮) -> 落库 (有会话时) -> 调用统计
 // session 为 nil 表示 stateless (外部调用未指定会话): 不带历史上下文, 不写会话消息
-func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg *AgentConfig, session *model.ChatSession, message, source, approvalSource string, tracker *executionTracker) (*ChatResult, error) {
+func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg *AgentConfig, session *model.ChatSession, message, source, approvalSource string, showThinking bool, tracker *executionTracker) (*ChatResult, error) {
 	agentID := agent.ID
 	sessionID := ""
 	if session != nil {
@@ -895,12 +914,21 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 		skillSection = s.skillSystemSection(st)
 	}
 
+	// 长期记忆注入 (M10.1): 检索 + 打分 + 组装"长期记忆"段, 失败/超时返回空段不阻断对话
+	memorySection := ""
+	var memInjected []string
+	if s.memSvc != nil && session != nil {
+		memorySection, memInjected = s.memSvc.BuildMemorySection(ctx, agentID, session, message)
+	}
+
 	// 上下文: 系统提示词 + 技能段 + 历史 (仅 user/assistant, 跳过失败的空应答; stateless 无历史) + 本轮消息
 	messages := make([]modelclient.ChatMessage, 0, 2)
-	if sysPrompt := strings.TrimSpace(agentCfg.SystemPrompt); sysPrompt != "" || skillSection != "" {
-		messages = append(messages, modelclient.ChatMessage{Role: "system", Content: sysPrompt + skillSection})
+	if sysPrompt := strings.TrimSpace(agentCfg.SystemPrompt); sysPrompt != "" || skillSection != "" || memorySection != "" {
+		messages = append(messages, modelclient.ChatMessage{Role: "system", Content: sysPrompt + skillSection + memorySection})
 	}
 	if session != nil {
+		// 会话滚动摘要 (M10.2, 设计文档 §7): Summary 非空时作为历史第一条注入
+		messages = withSessionSummary(session.Summary, messages)
 		history, err := s.messages.ListBySession(ctx, session.ID, chatHistoryLimit)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to load chat history")
@@ -942,11 +970,17 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	}
 
 	// 第一次模型调用
-	outcome, err := s.modelSvc.RouteAndChat(ctx, agentID, messages, tools, gen)
+	// 思考过程 (show_thinking): 流式模型调用, 思考增量实时推送 (thinking_delta) 并累积后落库
+	var thinking strings.Builder
+	onThinking := func(round int, delta string) {
+		thinking.WriteString(delta)
+		tracker.thinkingDelta(round, delta)
+	}
+	outcome, err := s.callModel(ctx, agentID, messages, tools, gen, showThinking, 1, onThinking)
 	if err != nil {
 		s.execLog(agentID, model.LogLevelError, fmt.Sprintf("%s model failed execution_id=%s error=%s", source, executionID, err))
 		if session != nil {
-			s.persistChatTurn(ctx, session, executionID, message, "", nil, nil, nil, start, "", 0, err)
+			s.persistChatTurn(ctx, session, executionID, message, "", nil, nil, memInjected, nil, start, "", 0, thinking.String(), err)
 		}
 		s.recordStat(agentID, start, 0, true)
 		s.execLog(agentID, model.LogLevelError, fmt.Sprintf("%s execution failed execution_id=%s error=%s", source, executionID, err))
@@ -967,11 +1001,11 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	if agentCfg.MaxToolRounds > 0 {
 		maxRounds = agentCfg.MaxToolRounds
 	}
-	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, sessionID, source, approvalSource, &pending, &mcpCalls, executionID, st, tracker)
+	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, sessionID, source, approvalSource, &pending, &mcpCalls, executionID, st, tracker, showThinking, onThinking)
 	if roundErr != nil {
 		if strings.TrimSpace(outcome.Content) == "" {
 			if session != nil {
-				s.persistChatTurn(ctx, session, executionID, message, "", mcpCalls, nil, pending, start, outcome.TemplateName, totalTokens, roundErr)
+				s.persistChatTurn(ctx, session, executionID, message, "", mcpCalls, nil, memInjected, pending, start, outcome.TemplateName, totalTokens, thinking.String(), roundErr)
 			}
 			s.recordStat(agentID, start, totalTokens, true)
 			s.execLog(agentID, model.LogLevelError, fmt.Sprintf("%s execution failed execution_id=%s error=%s", source, executionID, roundErr))
@@ -1003,11 +1037,13 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	if session != nil {
 		// 落库: user + tool + assistant (stateless 不写会话消息)
 		var pErr error
-		assistantID, pErr = s.persistChatTurn(ctx, session, executionID, message, finalReply, mcpCalls, skillCalls, pending, start, outcome.TemplateName, totalTokens, nil)
+		assistantID, pErr = s.persistChatTurn(ctx, session, executionID, message, finalReply, mcpCalls, skillCalls, memInjected, pending, start, outcome.TemplateName, totalTokens, thinking.String(), nil)
 		if pErr != nil {
 			s.recordStat(agentID, start, totalTokens, false)
 			return nil, pErr
 		}
+		// turn 结束异步记忆管线 (M10.2): 自动抽取 + 滚动摘要检查 (detached, best-effort, 不阻塞对话)
+		s.memExtract.PostTurn(agent, session)
 	}
 	s.recordStat(agentID, start, totalTokens, false)
 	s.execLog(agentID, model.LogLevelInfo, fmt.Sprintf("%s execution done execution_id=%s reply_len=%d tokens=%d latency=%dms pending=%d",
@@ -1217,6 +1253,19 @@ func truncateRune(s string, max int) string {
 	return string(r[:max]) + "..."
 }
 
+// callModel 模型调用封装: showThinking 为 true 时走流式接口, 思考增量经 onThinking (round, delta) 实时回传;
+// 否则走原有非流式接口 (行为不变)
+func (s *chatService) callModel(ctx context.Context, agentID string, messages []modelclient.ChatMessage, tools []modelclient.ChatToolDef, gen modelclient.GenOptions, showThinking bool, round int, onThinking func(round int, delta string)) (*ChatOutcome, error) {
+	if showThinking {
+		return s.modelSvc.RouteAndChatStream(ctx, agentID, messages, tools, gen, func(delta string) {
+			if onThinking != nil {
+				onThinking(round, delta)
+			}
+		})
+	}
+	return s.modelSvc.RouteAndChat(ctx, agentID, messages, tools, gen)
+}
+
 // runToolRounds 工具调用轮循环: 模型持续发起工具调用时执行并回传结果, 直到模型停止、
 // 达到轮数上限 (超限后不再下发工具, 强制模型给出最终答复) 或遇到需人工审核的工具
 // (审核门禁: 立即暂停本轮, 不执行同批后续工具调用, 不再发起后续模型轮, 由
@@ -1239,6 +1288,8 @@ func (s *chatService) runToolRounds(
 	executionID string,
 	st *skillTurn,
 	tracker *executionTracker,
+	showThinking bool,
+	onThinking func(round int, delta string),
 ) (int, error) {
 	var totalTokens int
 	for round := 1; len(outcome.ToolCalls) > 0; round++ {
@@ -1293,7 +1344,7 @@ func (s *chatService) runToolRounds(
 			tracker.stage(fmt.Sprintf("model:round=%d", round+1))
 			tracker.modelRound(round+1, false)
 		}
-		outcome2, err := s.modelSvc.RouteAndChat(ctx, agentID, *messages, roundTools, gen)
+		outcome2, err := s.callModel(ctx, agentID, *messages, roundTools, gen, showThinking, round+1, onThinking)
 		if err != nil {
 			s.execLog(agentID, model.LogLevelWarn, fmt.Sprintf("%s model after tools failed execution_id=%s round=%d error=%s", source, executionID, round, err))
 			return totalTokens, err
@@ -1354,10 +1405,18 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	if st != nil {
 		skillSection = s.skillSystemSection(st)
 	}
-	messages := make([]modelclient.ChatMessage, 0, len(history)+2)
-	if sysPrompt := strings.TrimSpace(agentCfg.SystemPrompt); sysPrompt != "" || skillSection != "" {
-		messages = append(messages, modelclient.ChatMessage{Role: "system", Content: sysPrompt + skillSection})
+	// 长期记忆注入 (M10.1): 续答轮同样携带记忆上下文 (空查询: 按时间衰减 + 使用频率取近期记忆)
+	memorySection := ""
+	var memInjected []string
+	if s.memSvc != nil {
+		memorySection, memInjected = s.memSvc.BuildMemorySection(ctx, agentID, session, "")
 	}
+	messages := make([]modelclient.ChatMessage, 0, len(history)+2)
+	if sysPrompt := strings.TrimSpace(agentCfg.SystemPrompt); sysPrompt != "" || skillSection != "" || memorySection != "" {
+		messages = append(messages, modelclient.ChatMessage{Role: "system", Content: sysPrompt + skillSection + memorySection})
+	}
+	// 会话滚动摘要 (M10.2, 设计文档 §7): 续答轮同样携带摘要上下文
+	messages = withSessionSummary(session.Summary, messages)
 	for i := range history {
 		m := history[i]
 		if m.Role != model.ChatRoleUser && m.Role != model.ChatRoleAssistant {
@@ -1440,7 +1499,7 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	if agentCfg.MaxToolRounds > 0 {
 		maxRounds = agentCfg.MaxToolRounds
 	}
-	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, session.ID, sourceLabel, approval.Source, &pending, &mcpCalls, executionID, st, nil)
+	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, session.ID, sourceLabel, approval.Source, &pending, &mcpCalls, executionID, st, nil, false, nil)
 	if roundErr != nil {
 		log.Printf("chat: continuation tool rounds failed approval=%s: %v", approval.ID, roundErr)
 	}
@@ -1462,6 +1521,9 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 		"approval_status": approval.Status,
 		"mcp_calls":       mcpCalls,
 	}
+	if len(memInjected) > 0 {
+		meta["memory_injected"] = memInjected
+	}
 	if st != nil && len(st.calls) > 0 {
 		meta["skill_calls"] = st.calls
 	}
@@ -1479,6 +1541,8 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 		return
 	}
 	_ = s.sessions.TouchLastMessage(ctx, session.ID)
+	// turn 结束异步记忆管线 (M10.2): 自动抽取 + 滚动摘要检查 (detached, best-effort)
+	s.memExtract.PostTurn(agent, session)
 	latencyMs := time.Since(start).Milliseconds()
 	totalTokens := outcome.TotalTokens + extraTokens
 	s.execLog(agentID, model.LogLevelInfo, fmt.Sprintf("chat continuation done approval_id=%s status=%s session=%s reply_len=%d tokens=%d latency=%dms", approval.ID, approval.Status, session.ID, len([]rune(reply)), totalTokens, latencyMs))
@@ -1594,8 +1658,9 @@ func (s *chatService) GetApprovalContinuation(ctx context.Context, approvalID st
 	return s.messages.GetByExecutionID(ctx, "appr-"+approvalID)
 }
 
-// persistChatTurn 落库一轮对话 (user + tool + assistant), 返回 assistant 消息 ID
-func (s *chatService) persistChatTurn(ctx context.Context, session *model.ChatSession, executionID, userMsg, reply string, calls []MCPChatCall, skillCalls []SkillCall, pending []runtime.PendingApproval, start time.Time, modelName string, totalTokens int, errMsg error) (string, error) {
+// persistChatTurn 落库一轮对话 (user + tool + assistant), 返回 assistant 消息 ID;
+// memInjected 为本轮注入的记忆 ID 列表 (M10.1, 写入 execution_meta.memory_injected)
+func (s *chatService) persistChatTurn(ctx context.Context, session *model.ChatSession, executionID, userMsg, reply string, calls []MCPChatCall, skillCalls []SkillCall, memInjected []string, pending []runtime.PendingApproval, start time.Time, modelName string, totalTokens int, thinking string, errMsg error) (string, error) {
 	meta := map[string]interface{}{
 		"execution_id": executionID,
 		"latency_ms":   time.Since(start).Milliseconds(),
@@ -1604,11 +1669,17 @@ func (s *chatService) persistChatTurn(ctx context.Context, session *model.ChatSe
 	if len(skillCalls) > 0 {
 		meta["skill_calls"] = skillCalls
 	}
+	if len(memInjected) > 0 {
+		meta["memory_injected"] = memInjected
+	}
 	if modelName != "" {
 		meta["model_name"] = modelName
 	}
 	if totalTokens > 0 {
 		meta["total_tokens"] = totalTokens
+	}
+	if thinking != "" {
+		meta["thinking"] = thinking
 	}
 	if len(pending) > 0 {
 		meta["pending_approvals"] = pending
@@ -1715,4 +1786,14 @@ func truncateTitle(s string) string {
 		return string(runes[:chatTitleMaxRunes]) + "..."
 	}
 	return s
+}
+
+// withSessionSummary 会话滚动摘要注入 (M10.2, 设计文档 §7): Summary 非空时
+// 作为历史第一条 (role=user) 插入, 前缀 "以下是更早对话的摘要："
+func withSessionSummary(summary string, messages []modelclient.ChatMessage) []modelclient.ChatMessage {
+	trimmed := strings.TrimSpace(summary)
+	if trimmed == "" {
+		return messages
+	}
+	return append([]modelclient.ChatMessage{{Role: model.ChatRoleUser, Content: "以下是更早对话的摘要：" + trimmed}}, messages...)
 }

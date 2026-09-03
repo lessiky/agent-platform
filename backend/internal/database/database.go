@@ -79,6 +79,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.AuditLog{},
 		&model.ChatSession{},
 		&model.ChatMessage{},
+		&model.Memory{},
 		&model.AgentExecution{},
 		&model.Workflow{},
 		&model.WorkflowVersion{},

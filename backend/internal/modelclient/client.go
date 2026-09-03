@@ -1,6 +1,7 @@
 package modelclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -242,6 +244,7 @@ type GenOptions struct {
 // ChatResult 一次对话调用结果
 type ChatResult struct {
 	Content      string
+	Reasoning    string // 模型思考过程 (reasoning_content, 非思考模型为空)
 	Model        string
 	FinishReason string
 	TotalTokens  int
@@ -304,8 +307,9 @@ func (c *Client) Chat(ctx context.Context, model string, messages []ChatMessage,
 		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
-				Content   string         `json:"content"`
-				ToolCalls []ChatToolCall `json:"tool_calls"`
+				Content          string         `json:"content"`
+				ReasoningContent string         `json:"reasoning_content"`
+				ToolCalls        []ChatToolCall `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -325,10 +329,276 @@ func (c *Client) Chat(ctx context.Context, model string, messages []ChatMessage,
 
 	result := &ChatResult{
 		Content:      parsed.Choices[0].Message.Content,
+		Reasoning:    parsed.Choices[0].Message.ReasoningContent,
 		Model:        parsed.Model,
 		FinishReason: parsed.Choices[0].FinishReason,
 		TotalTokens:  parsed.Usage.TotalTokens,
 		ToolCalls:    parsed.Choices[0].Message.ToolCalls,
 	}
 	return result, nil
+}
+
+// streamToolCallDelta 流式工具调用增量 (按 index 分片累积)
+type streamToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// ChatStream 流式调用 OpenAI 兼容 /chat/completions (stream: true):
+// 逐块解析 SSE, 思考增量 (reasoning_content / reasoning) 经 onReasoning 实时回调,
+// 正文与工具调用累积后以与 Chat 相同的 ChatResult 返回;
+// onReasoning 为 nil 或非思考模型时不产生思考回调
+func (c *Client) ChatStream(ctx context.Context, model string, messages []ChatMessage, tools []ChatToolDef, gen GenOptions, onReasoning func(delta string)) (*ChatResult, error) {
+	if c.Provider != "openai" && c.Provider != "custom" {
+		return nil, fmt.Errorf("provider %s 的对话接口 Phase 1 暂不支持 (仅 openai/custom)", c.Provider)
+	}
+	base := strings.TrimRight(strings.TrimSpace(c.Endpoint), "/")
+	if base == "" {
+		base = DefaultEndpoints["openai"]
+	}
+
+	payload := map[string]interface{}{
+		"model":    model,
+		"messages": messages,
+		"stream":   true,
+		"stream_options": map[string]interface{}{
+			"include_usage": true, // 末尾块携带 usage, 保证配额/用量统计 (不支持的端点会忽略)
+		},
+	}
+	if len(tools) > 0 {
+		payload["tools"] = tools
+	}
+	if gen.Temperature != nil {
+		payload["temperature"] = *gen.Temperature
+	}
+	if gen.MaxTokens != nil {
+		payload["max_tokens"] = *gen.MaxTokens
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/chat/completions", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("chat stream request failed: %s", truncate(err.Error(), 300))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 300))
+	}
+
+	var (
+		content      string
+		reasoning    string
+		finishReason string
+		modelOut     string
+		totalTokens  int
+		toolCalls    []ChatToolCall
+		toolPos      = make(map[int]int) // 流式工具调用 index -> toolCalls 下标
+	)
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Model string `json:"model"`
+			Usage struct {
+				TotalTokens int `json:"total_tokens"`
+			} `json:"usage"`
+			Choices []struct {
+				Delta struct {
+					Content          string                `json:"content"`
+					ReasoningContent string                `json:"reasoning_content"`
+					Reasoning        string                `json:"reasoning"`
+					ToolCalls        []streamToolCallDelta `json:"tool_calls"`
+				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue // 非 JSON 块 (注释/网关杂音) 跳过
+		}
+		if chunk.Model != "" {
+			modelOut = chunk.Model
+		}
+		if chunk.Usage.TotalTokens > 0 {
+			totalTokens = chunk.Usage.TotalTokens
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		delta := chunk.Choices[0].Delta
+		if delta.Content != "" {
+			content += delta.Content
+		}
+		rd := delta.ReasoningContent
+		if rd == "" {
+			rd = delta.Reasoning
+		}
+		if rd != "" {
+			reasoning += rd
+			if onReasoning != nil {
+				onReasoning(rd)
+			}
+		}
+		for _, td := range delta.ToolCalls {
+			if pos, ok := toolPos[td.Index]; ok {
+				if td.ID != "" {
+					toolCalls[pos].ID = td.ID
+				}
+				if td.Type != "" {
+					toolCalls[pos].Type = td.Type
+				}
+				toolCalls[pos].Function.Name += td.Function.Name
+				toolCalls[pos].Function.Arguments += td.Function.Arguments
+			} else {
+				toolPos[td.Index] = len(toolCalls)
+				toolCalls = append(toolCalls, ChatToolCall{ID: td.ID, Type: td.Type})
+				toolCalls[len(toolCalls)-1].Function.Name = td.Function.Name
+				toolCalls[len(toolCalls)-1].Function.Arguments = td.Function.Arguments
+			}
+		}
+		if chunk.Choices[0].FinishReason != "" {
+			finishReason = chunk.Choices[0].FinishReason
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("chat stream read failed: %s", truncate(err.Error(), 300))
+	}
+	if content == "" && len(toolCalls) == 0 && finishReason == "" {
+		return nil, fmt.Errorf("chat stream returned no content")
+	}
+
+	return &ChatResult{
+		Content:      content,
+		Reasoning:    reasoning,
+		Model:        modelOut,
+		FinishReason: finishReason,
+		TotalTokens:  totalTokens,
+		ToolCalls:    toolCalls,
+	}, nil
+}
+
+// EmbedResult embedding 调用结果 (M10.3 语义检索)
+type EmbedResult struct {
+	Vectors     [][]float64 // 与 input 顺序一致
+	Model       string
+	TotalTokens int
+}
+
+// Embed 调用 OpenAI 兼容 /embeddings (M10.3 语义检索)
+//
+// 仅支持 openai/custom 提供商 (OpenAI 兼容端点); input 为文本批次, 向量按 index 重排后与 input 顺序一致。
+func (c *Client) Embed(ctx context.Context, model string, inputs []string) (*EmbedResult, error) {
+	if c.Provider != "openai" && c.Provider != "custom" {
+		return nil, fmt.Errorf("provider %s 的 embedding 接口暂不支持 (仅 openai/custom)", c.Provider)
+	}
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("embedding input is empty")
+	}
+	base := strings.TrimRight(strings.TrimSpace(c.Endpoint), "/")
+	if base == "" {
+		base = DefaultEndpoints["openai"]
+	}
+
+	payload := map[string]interface{}{
+		"model": model,
+		"input": inputs,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/embeddings", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("embed request failed: %s", truncate(err.Error(), 300))
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	switch {
+	case resp.StatusCode == http.StatusOK:
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return nil, fmt.Errorf("unauthorized: HTTP %d (API Key 无效?)", resp.StatusCode)
+	default:
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 300))
+	}
+
+	if isHTMLResponse(respBody) {
+		return nil, fmt.Errorf("embed response is HTML instead of JSON: endpoint path may be incorrect (missing /v1?), address: %s", base+"/embeddings")
+	}
+	var parsed struct {
+		Model string `json:"model"`
+		Data  []struct {
+			Index     int       `json:"index"`
+			Embedding []float64 `json:"embedding"`
+		} `json:"data"`
+		Usage struct {
+			TotalTokens int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("embed response parse failed: %s", truncate(err.Error(), 200))
+	}
+	if len(parsed.Data) == 0 {
+		return nil, fmt.Errorf("embed response has no data")
+	}
+
+	type indexed struct {
+		i int
+		v []float64
+	}
+	list := make([]indexed, 0, len(parsed.Data))
+	for i := range parsed.Data {
+		d := &parsed.Data[i]
+		pos := d.Index
+		if pos < 0 || pos >= len(inputs) {
+			pos = i
+		}
+		list = append(list, indexed{i: pos, v: d.Embedding})
+	}
+	sort.Slice(list, func(a, b int) bool { return list[a].i < list[b].i })
+
+	vectors := make([][]float64, len(list))
+	for i := range list {
+		if len(list[i].v) == 0 {
+			return nil, fmt.Errorf("embed response contains an empty vector (index=%d)", list[i].i)
+		}
+		vectors[i] = list[i].v
+	}
+	return &EmbedResult{
+		Vectors:     vectors,
+		Model:       parsed.Model,
+		TotalTokens: parsed.Usage.TotalTokens,
+	}, nil
 }

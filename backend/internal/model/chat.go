@@ -26,6 +26,7 @@ type ChatSession struct {
 	Title         string    `gorm:"type:varchar(128)" json:"title"`
 	UserID        *string   `gorm:"type:uuid" json:"user_id"`
 	Status        string    `gorm:"type:varchar(16);not null;default:'active'" json:"status"`
+	Summary       string    `gorm:"type:text" json:"summary"` // 滚动摘要 (M10.2), 空 = 未触发
 	LastMessageAt time.Time `json:"last_message_at"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`

@@ -40,6 +40,21 @@ services:
       MODEL_HEALTH_INTERVAL: 1m
       MODEL_CHECK_TIMEOUT: 5s
       MODEL_CHAT_TIMEOUT: 120s
+      # 记忆模块 (检索注入 / 自动抽取 + 滚动摘要)
+      MEMORY_ENABLED: "true"
+      MEMORY_MAX_INJECT: "10"
+      MEMORY_CHAR_BUDGET: "800"
+      MEMORY_RETRIEVAL_TIMEOUT: 500ms
+      MEMORY_CACHE_TTL: 60s
+      MEMORY_EXTRACT_ENABLED: "true"
+      MEMORY_EXTRACT_MIN_TURNS: "5"
+      # 抽取/摘要模型: 空 = Agent 当前模型; 也可在平台设置页配置 (平台设置优先, 免重启生效)
+      MEMORY_EXTRACT_MODEL: ${MEMORY_EXTRACT_MODEL:-}
+      MEMORY_MAX_ACTIVE_PER_SCOPE: "500"
+      MEMORY_SESSION_SUMMARY_THRESHOLD: "40"
+      # 向量模型: 空 = 纯关键词检索 (语义检索不生效); 也可在平台设置页配置 (平台设置优先, 免重启生效)
+      MEMORY_EMBED_MODEL: ${MEMORY_EMBED_MODEL:-}
+      MEMORY_EMBED_TIMEOUT: 10s
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     volumes:

@@ -98,7 +98,7 @@ func TestRunToolRoundsHaltOnApproval(t *testing.T) {
 	var pending []runtime.PendingApproval
 	var calls []MCPChatCall
 
-	if _, err := s.runToolRounds(context.Background(), "agent-1", &messages, outcome, nil, toolIndex, modelclient.GenOptions{}, 5, "sess-1", "chat", model.ApprovalSourceChat, &pending, &calls, "exec-1", nil, nil); err != nil {
+	if _, err := s.runToolRounds(context.Background(), "agent-1", &messages, outcome, nil, toolIndex, modelclient.GenOptions{}, 5, "sess-1", "chat", model.ApprovalSourceChat, &pending, &calls, "exec-1", nil, nil, false, nil); err != nil {
 		t.Fatalf("runToolRounds: %v", err)
 	}
 
@@ -140,7 +140,7 @@ func TestRunToolRoundsHaltMidBatch(t *testing.T) {
 	var pending []runtime.PendingApproval
 	var calls []MCPChatCall
 
-	if _, err := s.runToolRounds(context.Background(), "agent-1", &messages, outcome, nil, toolIndex, modelclient.GenOptions{}, 5, "sess-1", "chat", model.ApprovalSourceChat, &pending, &calls, "exec-1", nil, nil); err != nil {
+	if _, err := s.runToolRounds(context.Background(), "agent-1", &messages, outcome, nil, toolIndex, modelclient.GenOptions{}, 5, "sess-1", "chat", model.ApprovalSourceChat, &pending, &calls, "exec-1", nil, nil, false, nil); err != nil {
 		t.Fatalf("runToolRounds: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func TestRunToolRoundsNoApprovalUnchanged(t *testing.T) {
 	var pending []runtime.PendingApproval
 	var calls []MCPChatCall
 
-	if _, err := s.runToolRounds(context.Background(), "agent-1", &messages, outcome, nil, toolIndex, modelclient.GenOptions{}, 5, "sess-1", "chat", model.ApprovalSourceChat, &pending, &calls, "exec-1", nil, nil); err != nil {
+	if _, err := s.runToolRounds(context.Background(), "agent-1", &messages, outcome, nil, toolIndex, modelclient.GenOptions{}, 5, "sess-1", "chat", model.ApprovalSourceChat, &pending, &calls, "exec-1", nil, nil, false, nil); err != nil {
 		t.Fatalf("runToolRounds: %v", err)
 	}
 

@@ -140,6 +140,7 @@ type agentService struct {
 	skillRepo     repository.SkillRepository
 	chatSessions  repository.ChatSessionRepository
 	chat          ChatService                       // 对话链路 (API Key /invoke 复用, 返回模型应答)
+	memories      repository.MemoryRepository       // 长期记忆 (M10.1): 删除 Agent 级联清理
 	toolApprovals repository.ToolApprovalRepository // /invoke 202 待审核结果的 Key 鉴权查询
 	modelSvc      ModelTemplateService              // /invoke 降级决策 (无可用模型时走旧链)
 }
@@ -158,6 +159,7 @@ func NewAgentService(
 	skillRepo repository.SkillRepository,
 	chatSessions repository.ChatSessionRepository,
 	chat ChatService,
+	memories repository.MemoryRepository,
 	toolApprovals repository.ToolApprovalRepository,
 	modelSvc ModelTemplateService,
 ) AgentService {
@@ -175,6 +177,7 @@ func NewAgentService(
 		skillRepo:     skillRepo,
 		chatSessions:  chatSessions,
 		chat:          chat,
+		memories:      memories,
 		toolApprovals: toolApprovals,
 		modelSvc:      modelSvc,
 	}
@@ -469,6 +472,9 @@ func (s *agentService) DeleteAgent(ctx context.Context, id string) error {
 	}
 	if err := s.chatSessions.DeleteByAgentCascade(ctx, id); err != nil {
 		return errors.Wrap(err, "failed to delete chat sessions")
+	}
+	if err := s.memories.DeleteByAgent(ctx, id); err != nil {
+		return errors.Wrap(err, "failed to delete memories")
 	}
 	if err := s.chat.DeleteExecutionsByAgent(ctx, id); err != nil {
 		return errors.Wrap(err, "failed to delete executions")

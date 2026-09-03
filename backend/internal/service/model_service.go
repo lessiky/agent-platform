@@ -149,19 +149,32 @@ type ModelTemplateService interface {
 	RouteAndConsume(ctx context.Context, agentID string, tokens, latencyMs int, failed bool) (string, bool)
 	// RouteAndChat 路由选择 + 真实模型对话调用 (故障转移) + 配额消费 + 用量记录 (M2.5)
 	RouteAndChat(ctx context.Context, agentID string, messages []modelclient.ChatMessage, tools []modelclient.ChatToolDef, gen modelclient.GenOptions) (*ChatOutcome, error)
+	// ChatForMemory 记忆域模型调用 (M10.2 自动抽取 / 滚动摘要): templateName 非空 -> 定向该模板
+	// (名称不区分大小写; 未找到/不可用时告警并回落 Agent 路由); 为空 -> 同 RouteAndChat 路由;
+	// 用量经 consumeUsage 计入 ModelUsageLog / 配额 (与对话调用同路径计量)
+	ChatForMemory(ctx context.Context, agentID, templateName string, messages []modelclient.ChatMessage, gen modelclient.GenOptions) (*ChatOutcome, error)
+	// EmbedForMemory 记忆向量计算 (M10.3 语义检索): 定向 templateName 模板 (不区分大小写),
+	// 未找到/不可用时返回错误 (调用方降级为纯关键词检索, 不回落 Agent 路由);
+	// 用量经 consumeUsage 计入 ModelUsageLog / 配额 (与对话调用同路径计量)
+	EmbedForMemory(ctx context.Context, templateName string, inputs []string) ([][]float64, error)
+	// RouteAndChatStream 流式版 RouteAndChat: 模型思考增量 (reasoning) 经 onReasoning 实时回调,
+	// 路由/故障转移/配额/用量行为与 RouteAndChat 相同; 正文与工具调用累积后整体返回
+	RouteAndChatStream(ctx context.Context, agentID string, messages []modelclient.ChatMessage, tools []modelclient.ChatToolDef, gen modelclient.GenOptions, onReasoning func(delta string)) (*ChatOutcome, error)
 	// ModelAvailable 该 Agent 是否有可路由的模型模板 (dry-run, 不消耗配额; 供 /invoke 降级决策)
 	ModelAvailable(ctx context.Context, agentID string) bool
 }
 
 type modelTemplateService struct {
-	templates repository.ModelTemplateRepository
-	quotas    repository.ModelQuotaRepository
-	usage     repository.ModelUsageLogRepository
-	health    repository.ModelHealthLogRepository
-	agents    repository.AgentRepository
-	cipher    *crypto.AesGCM
-	checkTime time.Duration
-	chatTime  time.Duration
+	templates   repository.ModelTemplateRepository
+	quotas      repository.ModelQuotaRepository
+	usage       repository.ModelUsageLogRepository
+	health      repository.ModelHealthLogRepository
+	agents      repository.AgentRepository
+	cipher      *crypto.AesGCM
+	checkTime   time.Duration
+	chatTime    time.Duration
+	embedTime   time.Duration
+	embedSource TemplateSource // M10.3: 向量专用模板名的运行时来源 (不参与对话路由; 平台设置页可免重启切换)
 }
 
 func NewModelTemplateService(
@@ -173,6 +186,8 @@ func NewModelTemplateService(
 	cipher *crypto.AesGCM,
 	checkTimeout time.Duration,
 	chatTimeout time.Duration,
+	embedTimeout time.Duration,
+	embedSource TemplateSource,
 ) ModelTemplateService {
 	if checkTimeout <= 0 {
 		checkTimeout = 5 * time.Second
@@ -180,15 +195,20 @@ func NewModelTemplateService(
 	if chatTimeout <= 0 {
 		chatTimeout = 120 * time.Second
 	}
+	if embedTimeout <= 0 {
+		embedTimeout = 10 * time.Second
+	}
 	return &modelTemplateService{
-		templates: templates,
-		quotas:    quotas,
-		usage:     usage,
-		health:    health,
-		agents:    agents,
-		cipher:    cipher,
-		checkTime: checkTimeout,
-		chatTime:  chatTimeout,
+		templates:   templates,
+		quotas:      quotas,
+		usage:       usage,
+		health:      health,
+		agents:      agents,
+		cipher:      cipher,
+		checkTime:   checkTimeout,
+		chatTime:    chatTimeout,
+		embedTime:   embedTimeout,
+		embedSource: embedSource,
 	}
 }
 
@@ -357,7 +377,8 @@ func (s *modelTemplateService) Test(ctx context.Context, id string) (*ProbeView,
 	return s.CheckHealth(ctx, t), nil
 }
 
-// SayHi 发送Hi消息测试: 真实调用一次对话接口, 验证模型能否正常生成回复
+// SayHi 发送Hi消息测试: 对话模板真实调用一次对话接口, 验证模型能否正常生成回复;
+// 向量专用模板 (记忆语义检索) 真实调用一次 /embeddings, 验证模型能否正常生成向量
 // (不消费配额, 不改变模板状态)
 func (s *modelTemplateService) SayHi(ctx context.Context, id string) (*HiView, error) {
 	t, err := s.templates.Get(ctx, id)
@@ -366,6 +387,9 @@ func (s *modelTemplateService) SayHi(ctx context.Context, id string) (*HiView, e
 	}
 	if t.Status == model.ModelStatusInactive {
 		return &HiView{OK: false, Error: "模板已手动停用"}, nil
+	}
+	if s.isEmbedTemplate(t) {
+		return s.sayHiEmbed(ctx, t), nil
 	}
 	if t.Provider != "openai" && t.Provider != "custom" {
 		return &HiView{OK: false, Error: fmt.Sprintf("provider %s 的对话接口暂不支持 (仅 openai/custom)", t.Provider)}, nil
@@ -388,6 +412,47 @@ func (s *modelTemplateService) SayHi(ctx context.Context, id string) (*HiView, e
 		FinishReason: res.FinishReason,
 		TotalTokens:  res.TotalTokens,
 	}, nil
+}
+
+// sayHiEmbed 向量专用模板: 真实调用一次 /embeddings 生成文本向量, 验证模型能否正常工作
+func (s *modelTemplateService) sayHiEmbed(ctx context.Context, t *model.ModelTemplate) *HiView {
+	if t.Provider != "openai" && t.Provider != "custom" {
+		return &HiView{OK: false, Error: fmt.Sprintf("provider %s 的向量接口暂不支持 (仅 openai/custom)", t.Provider)}
+	}
+	client, err := s.embedClient(t)
+	if err != nil {
+		return &HiView{OK: false, Error: err.Error()}
+	}
+	start := time.Now()
+	res, err := client.Embed(ctx, t.Model, []string{"Hi"})
+	latency := int(time.Since(start).Milliseconds())
+	if err != nil {
+		return &HiView{OK: false, LatencyMs: latency, Error: truncate(err.Error(), 300)}
+	}
+	if len(res.Vectors) == 0 || len(res.Vectors[0]) == 0 {
+		return &HiView{OK: false, LatencyMs: latency, Error: "embedding 返回向量为空"}
+	}
+	vec := res.Vectors[0]
+	return &HiView{
+		OK:          true,
+		LatencyMs:   latency,
+		Content:     fmt.Sprintf("生成 %d 维向量 (前 3 维: %s)", len(vec), formatVectorPreview(vec)),
+		Model:       res.Model,
+		TotalTokens: res.TotalTokens,
+	}
+}
+
+// formatVectorPreview 取向量前 3 维用于展示
+func formatVectorPreview(vec []float64) string {
+	n := len(vec)
+	if n > 3 {
+		n = 3
+	}
+	parts := make([]string, n)
+	for i := 0; i < n; i++ {
+		parts[i] = fmt.Sprintf("%.4f", vec[i])
+	}
+	return strings.Join(parts, ", ")
 }
 
 // genOptionsFromConfig 解析模板生成参数为对话选项 (解析失败返回零值)
@@ -604,6 +669,10 @@ func (s *modelTemplateService) Route(ctx context.Context) (*RouteResult, error) 
 	skipped := make([]RouteSkip, 0, len(templates))
 	for i := range templates {
 		t := templates[i]
+		if s.isEmbedTemplate(&t) {
+			skipped = append(skipped, RouteSkip{Name: t.Name, Model: t.Model, Reason: "embedding template (非对话模型)"})
+			continue
+		}
 		if reason, skip := s.skipReason(ctx, &t); skip {
 			skipped = append(skipped, RouteSkip{Name: t.Name, Model: t.Model, Reason: reason})
 			continue
@@ -641,6 +710,9 @@ func (s *modelTemplateService) RouteAndConsume(ctx context.Context, agentID stri
 	if preferred != "" {
 		for i := range templates {
 			t := templates[i]
+			if s.isEmbedTemplate(&t) {
+				continue
+			}
 			if !strings.EqualFold(t.Name, preferred) && !strings.EqualFold(t.Model, preferred) {
 				continue
 			}
@@ -655,6 +727,9 @@ func (s *modelTemplateService) RouteAndConsume(ctx context.Context, agentID stri
 	if selected == nil {
 		for i := range templates {
 			t := templates[i]
+			if s.isEmbedTemplate(&t) {
+				continue
+			}
 			if _, skip := s.skipReason(ctx, &t); skip {
 				continue
 			}
@@ -852,6 +927,9 @@ func (s *modelTemplateService) orderedCandidates(ctx context.Context, agentID st
 	}
 	var available []*model.ModelTemplate
 	for i := range templates {
+		if s.isEmbedTemplate(&templates[i]) {
+			continue
+		}
 		if _, skip := s.skipReason(ctx, &templates[i]); skip {
 			continue
 		}
@@ -902,6 +980,64 @@ func (s *modelTemplateService) chatClient(t *model.ModelTemplate) (*modelclient.
 	return modelclient.New(t.Provider, t.Endpoint, apiKey, s.chatTime), nil
 }
 
+// isEmbedTemplate 是否为向量专用模板 (M10.3): 该模板不参与对话路由 (Route / 故障转移均排除)
+func (s *modelTemplateService) isEmbedTemplate(t *model.ModelTemplate) bool {
+	if s.embedSource == nil {
+		return false
+	}
+	name := s.embedSource.Current()
+	return name != "" && strings.EqualFold(t.Name, name)
+}
+
+// embedClient 构建向量计算用客户端 (超时 MEMORY_EMBED_TIMEOUT, 默认 10s)
+func (s *modelTemplateService) embedClient(t *model.ModelTemplate) (*modelclient.Client, error) {
+	apiKey := ""
+	if len(t.APIKey) > 0 {
+		plain, err := s.cipher.Decrypt(t.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt api key (key changed?)")
+		}
+		apiKey = string(plain)
+	}
+	return modelclient.New(t.Provider, t.Endpoint, apiKey, s.embedTime), nil
+}
+
+// EmbedForMemory 记忆向量计算 (M10.3 语义检索): 定向 templateName 模板 (不区分大小写),
+// 未找到/不可用时返回错误 (调用方降级为纯关键词检索, 不回落 Agent 路由);
+// 用量经 consumeUsage 计入 ModelUsageLog / 配额 (与对话调用同路径计量)
+func (s *modelTemplateService) EmbedForMemory(ctx context.Context, templateName string, inputs []string) ([][]float64, error) {
+	name := strings.TrimSpace(templateName)
+	if name == "" {
+		return nil, fmt.Errorf("embedding model template not configured (MEMORY_EMBED_MODEL)")
+	}
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("embedding input is empty")
+	}
+	t, err := s.templates.GetByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, fmt.Errorf("embedding model template %q not found", name)
+	}
+	if reason, skip := s.skipReason(ctx, t); skip {
+		return nil, fmt.Errorf("embedding model template %q unavailable: %s", name, reason)
+	}
+	client, err := s.embedClient(t)
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	res, err := client.Embed(ctx, t.Model, inputs)
+	latency := int(time.Since(start).Milliseconds())
+	if err != nil {
+		s.consumeUsage(ctx, t, "", 0, latency, false, truncate(err.Error(), 300))
+		return nil, err
+	}
+	s.consumeUsage(ctx, t, "", res.TotalTokens, latency, true, "")
+	return res.Vectors, nil
+}
+
 // consumeUsage 配额消费 + 用量日志 (每次模型调用计次, 失败调用同样消耗)
 func (s *modelTemplateService) consumeUsage(ctx context.Context, t *model.ModelTemplate, agentID string, tokens, latencyMs int, ok bool, errMsg string) {
 	if quota, qErr := s.quotas.GetByModel(ctx, t.ID); qErr == nil && quota != nil {
@@ -914,7 +1050,10 @@ func (s *modelTemplateService) consumeUsage(ctx context.Context, t *model.ModelT
 			log.Printf("model service: quota update failed model=%s: %v", t.Name, uErr)
 		}
 	}
-	agentIDPtr := &agentID
+	var agentIDPtr *string
+	if agentID != "" {
+		agentIDPtr = &agentID
+	}
 	entry := &model.ModelUsageLog{
 		ModelID:   t.ID,
 		AgentID:   agentIDPtr,
@@ -941,7 +1080,21 @@ func (s *modelTemplateService) ModelAvailable(ctx context.Context, agentID strin
 }
 
 func (s *modelTemplateService) RouteAndChat(ctx context.Context, agentID string, messages []modelclient.ChatMessage, tools []modelclient.ChatToolDef, gen modelclient.GenOptions) (*ChatOutcome, error) {
-	candidates := s.orderedCandidates(ctx, agentID)
+	return s.routeAndChat(ctx, agentID, messages, tools, gen, false, nil)
+}
+
+// RouteAndChatStream 流式版 RouteAndChat: 思考增量经 onReasoning 实时回调 (正文不逐块回调, 累积后整体返回)
+func (s *modelTemplateService) RouteAndChatStream(ctx context.Context, agentID string, messages []modelclient.ChatMessage, tools []modelclient.ChatToolDef, gen modelclient.GenOptions, onReasoning func(delta string)) (*ChatOutcome, error) {
+	return s.routeAndChat(ctx, agentID, messages, tools, gen, true, onReasoning)
+}
+
+// routeAndChat 路由选择 + 模型对话调用公共循环 (故障转移), stream 为 true 时走流式接口并回调思考增量
+func (s *modelTemplateService) routeAndChat(ctx context.Context, agentID string, messages []modelclient.ChatMessage, tools []modelclient.ChatToolDef, gen modelclient.GenOptions, stream bool, onReasoning func(delta string)) (*ChatOutcome, error) {
+	return s.routeCandidates(ctx, agentID, s.orderedCandidates(ctx, agentID), messages, tools, gen, stream, onReasoning)
+}
+
+// routeCandidates 按候选模板列表逐个尝试的模型对话调用循环 (故障转移), stream 为 true 时走流式接口并回调思考增量
+func (s *modelTemplateService) routeCandidates(ctx context.Context, agentID string, candidates []*model.ModelTemplate, messages []modelclient.ChatMessage, tools []modelclient.ChatToolDef, gen modelclient.GenOptions, stream bool, onReasoning func(delta string)) (*ChatOutcome, error) {
 	if len(candidates) == 0 {
 		return nil, ErrNoModelAvailable
 	}
@@ -954,7 +1107,12 @@ func (s *modelTemplateService) RouteAndChat(ctx context.Context, agentID string,
 			continue
 		}
 		start := time.Now()
-		res, err := client.Chat(ctx, t.Model, messages, tools, gen)
+		var res *modelclient.ChatResult
+		if stream {
+			res, err = client.ChatStream(ctx, t.Model, messages, tools, gen, onReasoning)
+		} else {
+			res, err = client.Chat(ctx, t.Model, messages, tools, gen)
+		}
 		latency := int(time.Since(start).Milliseconds())
 		if err != nil {
 			lastErr = err
@@ -974,4 +1132,27 @@ func (s *modelTemplateService) RouteAndChat(ctx context.Context, agentID string,
 		}, nil
 	}
 	return nil, fmt.Errorf("all model templates failed: %v", lastErr)
+}
+
+// ChatForMemory 记忆域模型调用 (M10.2 自动抽取 / 滚动摘要):
+// templateName 非空 -> 定向该模型模板 (名称不区分大小写); 未找到或不可用时告警并回落 Agent 路由;
+// 为空 -> 与 RouteAndChat 相同的路由 (Agent 优先模型 + 故障转移)。
+// 用量经 consumeUsage 计入 ModelUsageLog / 配额, 与对话调用同路径计量 (M10 设计 §5.3)
+func (s *modelTemplateService) ChatForMemory(ctx context.Context, agentID, templateName string, messages []modelclient.ChatMessage, gen modelclient.GenOptions) (*ChatOutcome, error) {
+	var candidates []*model.ModelTemplate
+	if name := strings.TrimSpace(templateName); name != "" {
+		if t, err := s.templates.GetByName(ctx, name); err == nil && t != nil {
+			if _, skip := s.skipReason(ctx, t); !skip {
+				candidates = []*model.ModelTemplate{t}
+			} else {
+				log.Printf("model service: extract model %q unavailable, fallback to agent routing agent=%s", name, agentID)
+			}
+		} else {
+			log.Printf("model service: extract model %q not found, fallback to agent routing agent=%s", name, agentID)
+		}
+	}
+	if len(candidates) == 0 {
+		candidates = s.orderedCandidates(ctx, agentID)
+	}
+	return s.routeCandidates(ctx, agentID, candidates, messages, nil, gen, false, nil)
 }

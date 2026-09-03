@@ -93,6 +93,29 @@ PostgreSQL
 
 ---
 
+### 2.4 长期记忆数据模型 (M10)
+
+M10 引入长期记忆体系，涉及 1 张新表与 1 个新列：
+
+**新表 `agent_memories`（长期记忆）**
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `id` | uuid PK | |
+| `agent_id` | uuid | 所属 Agent |
+| `user_id` | uuid，可空 | 属主（user 级记忆）；NULL = Agent 级全局记忆 |
+| `kind` | varchar(16) | `preference` / `fact` / `decision` / `event` |
+| `content` | text | 记忆内容（≤500 字符） |
+| `source` | varchar(16) | `user_explicit` 显式添加 / `llm_extracted` 对话自动抽取 |
+| `status` | varchar(16) | `active` / `archived`（停用即归档，不参与注入） |
+| `access_count` | int | 注入命中次数（记忆评分衰减因子） |
+| `last_accessed_at` | timestamptz | 最近注入时间 |
+| `embedding` | jsonb，可空 | 预留语义检索（M10.3） |
+
+索引：`idx_mem_scope (agent_id, user_id, status)`，供注入检索与列表查询。
+
+**新列 `agent_chat_sessions.summary`（滚动摘要，M10.2）**：text，空 = 未触发。会话消息数超过阈值（`MEMORY_SESSION_SUMMARY_THRESHOLD`，默认 40）后由异步管线对旧消息生成/刷新（≤300 字）；后续对话轮将其作为一条 user 消息（前缀“以下是更早对话的摘要：”）注入在历史消息之前，避免超长上下文。
+
 ## 3. 认证与授权
 
 ### 3.1 认证流程

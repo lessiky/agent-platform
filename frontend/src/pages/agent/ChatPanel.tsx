@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { App, Button, Card, Empty, Input, List, Popconfirm, Space, Spin, Tag, Tooltip } from 'antd';
-import { AuditOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, StopOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons';
+import { App, Button, Card, Checkbox, Empty, Input, List, Popconfirm, Space, Spin, Tag, Tooltip } from 'antd';
+import { AuditOutlined, BulbOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, StopOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons';
 import { agentApi, chatStream, type ChatStreamEventPayload } from '@/api/agent';
 import { getErrorMessage } from '@/api/client';
 import type { ChatMCPCall, ChatMessage, ChatPendingApproval, ChatSession, ChatSkillCall } from '@/types';
@@ -21,10 +21,16 @@ interface StreamToolItem {
   latencyMs?: number;
 }
 
+interface StreamThinkingSeg {
+  round: number;
+  text: string;
+}
+
 interface StreamProgress {
   stage: string;
   since: number;
   tools: StreamToolItem[];
+  thinking: StreamThinkingSeg[]; // 思考过程 (显示思考过程开启时, 按轮次分段累积)
 }
 
 export function ChatPanel({ agentId }: { agentId: string }) {
@@ -38,11 +44,18 @@ export function ChatPanel({ agentId }: { agentId: string }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const thinkingRef = useRef<HTMLDivElement>(null);
   // SSE 进度卡状态: progress 当前阶段/工具明细, now 秒级 tick, abortRef 停止控制, lastInputRef 停止后还原输入
   const [progress, setProgress] = useState<StreamProgress | null>(null);
   const [now, setNow] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
   const lastInputRef = useRef('');
+  // 显示思考过程 (用户偏好, localStorage 持久化): 勾选后实时展示模型思考增量, 历史消息展示思考块
+  const [showThinking, setShowThinking] = useState(() => localStorage.getItem('chat_show_thinking') === '1');
+  const onToggleShowThinking = (checked: boolean) => {
+    setShowThinking(checked);
+    localStorage.setItem('chat_show_thinking', checked ? '1' : '0');
+  };
   // 会话重命名 (行内编辑): 正在重命名的会话 / 输入值 / 保存中
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -91,6 +104,12 @@ export function ChatPanel({ agentId }: { agentId: string }) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, sending, progress]);
+  // 思考过程块内部自动滚动到底部
+  useEffect(() => {
+    if (thinkingRef.current) {
+      thinkingRef.current.scrollTop = thinkingRef.current.scrollHeight;
+    }
+  }, [progress]);
 
   // 发送中每秒刷新, 驱动进度卡"已耗时"计数
   useEffect(() => {
@@ -162,7 +181,7 @@ export function ChatPanel({ agentId }: { agentId: string }) {
       (d.mcp_name ? String(d.mcp_name) + '/' : '') + String(d.tool_name ?? '');
     switch (evt.type) {
       case 'turn_start':
-        setProgress({ stage: '已开始执行…', since: Date.now(), tools: [] });
+        setProgress({ stage: '已开始执行…', since: Date.now(), tools: [], thinking: [] });
         break;
       case 'model_round':
         setProgress((p) => {
@@ -173,7 +192,7 @@ export function ChatPanel({ agentId }: { agentId: string }) {
         break;
       case 'tool_start':
         setProgress((p) => {
-          const base = p ?? { stage: '', since: Date.now(), tools: [] };
+          const base = p ?? { stage: '', since: Date.now(), tools: [], thinking: [] };
           const label = toolLabel(data);
           return {
             ...base,
@@ -201,6 +220,23 @@ export function ChatPanel({ agentId }: { agentId: string }) {
           return { ...p, tools, stage: '模型思考中…' };
         });
         break;
+      case 'thinking_delta': {
+        const round = typeof data.round === 'number' ? data.round : 1;
+        const delta = String(data.delta ?? '');
+        if (!delta) return;
+        setProgress((p) => {
+          const base = p ?? { stage: '', since: Date.now(), tools: [], thinking: [] };
+          const segs = [...base.thinking];
+          const last = segs[segs.length - 1];
+          if (last && last.round === round) {
+            segs[segs.length - 1] = { round, text: last.text + delta };
+          } else {
+            segs.push({ round, text: delta });
+          }
+          return { ...base, thinking: segs };
+        });
+        break;
+      }
       case 'final':
       case 'error':
         break;
@@ -216,7 +252,7 @@ export function ChatPanel({ agentId }: { agentId: string }) {
     abortRef.current = controller;
     lastInputRef.current = text;
     setNow(Date.now());
-    setProgress({ stage: '请求中…', since: Date.now(), tools: [] });
+    setProgress({ stage: '请求中…', since: Date.now(), tools: [], thinking: [] });
     setSending(true);
     setInput('');
     // 乐观插入用户消息: 不等模型应答立即上屏; 成功后由服务端数据整体替换, 失败/停止时回滚移除
@@ -226,7 +262,8 @@ export function ChatPanel({ agentId }: { agentId: string }) {
       { id: tempId, session_id: activeId ?? '', role: 'user', content: text, execution_id: null, created_at: new Date().toISOString() },
     ]);
     try {
-      const result = await chatStream(agentId, activeId ? { session_id: activeId, message: text } : { message: text }, {
+      const streamBody = activeId ? { session_id: activeId, message: text } : { message: text };
+      const result = await chatStream(agentId, { ...streamBody, show_thinking: showThinking }, {
         signal: controller.signal,
         onEvent: handleStreamEvent,
       });
@@ -349,6 +386,11 @@ export function ChatPanel({ agentId }: { agentId: string }) {
         size='small'
         style={{ flex: 1 }}
         title={activeSession ? activeSession.title || '对话' : '新对话'}
+        extra={
+          <Checkbox checked={showThinking} onChange={(e) => onToggleShowThinking(e.target.checked)}>
+            显示思考过程
+          </Checkbox>
+        }
         styles={{ body: { display: 'flex', flexDirection: 'column', height: 'calc(100% - 39px)' } }}
       >
         <div style={{ flex: 1, overflowY: 'auto', padding: '4px 8px' }}>
@@ -360,7 +402,7 @@ export function ChatPanel({ agentId }: { agentId: string }) {
             <Empty style={{ marginTop: 80 }} description='输入提示词开始对话' />
           ) : (
             messages.map((m) => (
-              <MessageBubble key={m.id} msg={m} onOpenApprovals={() => navigate('/approvals')} />
+              <MessageBubble key={m.id} msg={m} onOpenApprovals={() => navigate('/approvals')} showThinking={showThinking} />
             ))
           )}
           {sending && (
@@ -396,6 +438,35 @@ export function ChatPanel({ agentId }: { agentId: string }) {
                         {t.latencyMs !== undefined ? ` ${t.latencyMs}ms` : ''}
                       </Tag>
                     ))}
+                  </div>
+                )}
+                {showThinking && progress && progress.thinking.length > 0 && (
+                  <div style={{ marginTop: 2 }}>
+                    <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 4 }}>
+                      <BulbOutlined style={{ marginRight: 4 }} />思考过程
+                    </div>
+                    <div
+                      ref={thinkingRef}
+                      style={{
+                        maxHeight: 180,
+                        overflowY: 'auto',
+                        background: '#fafafa',
+                        border: '1px dashed #d9d9d9',
+                        borderRadius: 6,
+                        padding: '6px 8px',
+                        fontSize: 12,
+                        color: '#666',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {progress.thinking.map((seg) => (
+                        <div key={seg.round} style={{ marginBottom: seg.round === progress.thinking.length - 1 ? 0 : 8 }}>
+                          {progress.thinking.length > 1 && <div style={{ color: '#bfbfbf', marginBottom: 2 }}>第 {seg.round} 轮</div>}
+                          {seg.text}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -438,9 +509,11 @@ export function ChatPanel({ agentId }: { agentId: string }) {
 function MessageBubble({
   msg,
   onOpenApprovals,
+  showThinking,
 }: {
   msg: ChatMessage;
   onOpenApprovals: () => void;
+  showThinking: boolean;
 }) {
   if (msg.role === 'tool') {
     const lines = msg.content
@@ -477,6 +550,7 @@ function MessageBubble({
   const mcpCalls = (meta?.mcp_calls as ChatMCPCall[] | undefined) ?? undefined;
   const pending = (meta?.pending_approvals as ChatPendingApproval[] | undefined) ?? undefined;
   const skillCalls = (meta?.skill_calls as ChatSkillCall[] | undefined) ?? undefined;
+  const thinking = typeof meta?.thinking === 'string' && meta.thinking ? meta.thinking : '';
 
   return (
     <div style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start', marginBottom: 12 }}>
@@ -492,6 +566,30 @@ function MessageBubble({
         }}
       >
         {msg.content ? <MathText text={msg.content} /> : <span style={{ opacity: 0.65 }}>(无应答内容)</span>}
+        {showThinking && thinking && (
+          <details style={{ marginTop: 6 }}>
+            <summary style={{ cursor: 'pointer', fontSize: 12, color: '#8c8c8c', userSelect: 'none', opacity: 0.9 }}>
+              思考过程
+            </summary>
+            <div
+              style={{
+                marginTop: 6,
+                maxHeight: 240,
+                overflowY: 'auto',
+                background: '#fafafa',
+                border: '1px dashed #d9d9d9',
+                borderRadius: 6,
+                padding: '6px 8px',
+                fontSize: 12,
+                color: '#666',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}
+            >
+              {thinking}
+            </div>
+          </details>
+        )}
         {!isUser && (
           <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
             {meta && (

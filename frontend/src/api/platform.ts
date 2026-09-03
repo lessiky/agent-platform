@@ -5,6 +5,12 @@ import type { PlatformSettings } from '@/types';
 export const platformApi = {
   get: () => apiClient.get<ApiEnvelope<PlatformSettings>>('/platform/settings'),
 
-  update: (data: { name: string; icon: string }) =>
+  // memory_embed_model / memory_extract_model: 空串 = 跟随对应环境变量
+  update: (data: {
+    name: string;
+    icon: string;
+    memory_embed_model?: string;
+    memory_extract_model?: string;
+  }) =>
     apiClient.put<ApiEnvelope<PlatformSettings>>('/platform/settings', data),
 };

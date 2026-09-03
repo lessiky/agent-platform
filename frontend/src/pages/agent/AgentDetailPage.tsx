@@ -31,6 +31,7 @@ import { ChatPanel } from './ChatPanel';
 import { VersionsPanel } from './VersionsPanel';
 import { KeysPanel } from './KeysPanel';
 import { SkillsPanel } from './SkillsPanel';
+import { MemoryPanel } from './MemoryPanel';
 import { MetricsPanel } from './MetricsPanel';
 import type { ColumnsType } from 'antd/es/table';
 import { Table } from 'antd';
@@ -213,6 +214,11 @@ export function AgentDetailPage() {
             key: 'skills',
             label: '关联技能',
             children: <SkillsPanel agentId={agent.id} usageMode={agent.config.skills_usage_mode} />,
+          },
+          {
+            key: 'memories',
+            label: '记忆',
+            children: <MemoryPanel agentId={agent.id} />,
           },
           {
             key: 'chat',

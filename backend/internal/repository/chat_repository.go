@@ -18,6 +18,8 @@ type ChatSessionRepository interface {
 	ListByAgent(ctx context.Context, agentID string, page, pageSize int) ([]model.ChatSession, int64, error)
 	// UpdateTitle 修改会话标题 (手动重命名)
 	UpdateTitle(ctx context.Context, id, title string) error
+	// UpdateSummary 更新会话滚动摘要 (M10.2)
+	UpdateSummary(ctx context.Context, id, summary string) error
 	TouchLastMessage(ctx context.Context, id string) error
 	DeleteByAgent(ctx context.Context, agentID string) error
 	// DeleteByAgentCascade 级联删除 Agent 全部会话及其消息 (M2.5)
@@ -29,6 +31,10 @@ type ChatSessionRepository interface {
 type ChatMessageRepository interface {
 	Append(ctx context.Context, msgs []*model.ChatMessage) error
 	ListBySession(ctx context.Context, sessionID string, limit int) ([]model.ChatMessage, error)
+	// CountChat 统计会话内 user/assistant 消息数 (M10.2 滚动摘要触发检查)
+	CountChat(ctx context.Context, sessionID string) (int64, error)
+	// ListForSummary 会话最旧的 user/assistant 消息 (时间升序, 排除最近 skipNewest 条; M10.2 滚动摘要压缩输入)
+	ListForSummary(ctx context.Context, sessionID string, skipNewest int) ([]model.ChatMessage, error)
 	DeleteBySession(ctx context.Context, sessionID string) error
 	// GetByExecutionID 按 execution_id 查最新一条 assistant 消息 (审核决策续答回查)
 	GetByExecutionID(ctx context.Context, executionID string) (*model.ChatMessage, error)
@@ -77,6 +83,12 @@ func (r *chatSessionRepository) ListByAgent(ctx context.Context, agentID string,
 func (r *chatSessionRepository) UpdateTitle(ctx context.Context, id, title string) error {
 	return database.DB.WithContext(ctx).Model(&model.ChatSession{}).
 		Where("id = ?", id).Update("title", title).Error
+}
+
+// UpdateSummary 更新会话滚动摘要 (M10.2, 仅写 summary 列)
+func (r *chatSessionRepository) UpdateSummary(ctx context.Context, id, summary string) error {
+	return database.DB.WithContext(ctx).Model(&model.ChatSession{}).
+		Where("id = ?", id).Update("summary", summary).Error
 }
 
 func (r *chatSessionRepository) TouchLastMessage(ctx context.Context, id string) error {
@@ -154,6 +166,32 @@ func (r *chatMessageRepository) ListBySession(ctx context.Context, sessionID str
 		recent[i], recent[j] = recent[j], recent[i]
 	}
 	return recent, nil
+}
+
+// CountChat 统计会话内 user/assistant 消息数 (M10.2 滚动摘要触发检查, 不含 tool 展示行)
+func (r *chatMessageRepository) CountChat(ctx context.Context, sessionID string) (int64, error) {
+	var n int64
+	err := database.DB.WithContext(ctx).Model(&model.ChatMessage{}).
+		Where("session_id = ? AND role IN ?", sessionID, []string{model.ChatRoleUser, model.ChatRoleAssistant}).
+		Count(&n).Error
+	return n, err
+}
+
+// ListForSummary 返回会话最旧的 user/assistant 消息 (时间升序, 排除最近 skipNewest 条, M10.2)
+func (r *chatMessageRepository) ListForSummary(ctx context.Context, sessionID string, skipNewest int) ([]model.ChatMessage, error) {
+	if skipNewest < 0 {
+		skipNewest = 0
+	}
+	const sql = `SELECT m.* FROM (
+		SELECT id, ROW_NUMBER() OVER (ORDER BY created_at DESC, id DESC) AS rn
+		FROM agent_chat_messages
+		WHERE session_id = ? AND role IN ('user','assistant')
+	) t JOIN agent_chat_messages m ON m.id = t.id
+	WHERE t.rn > ?
+	ORDER BY m.created_at ASC, m.id ASC`
+	var items []model.ChatMessage
+	err := database.DB.WithContext(ctx).Raw(sql, sessionID, skipNewest).Scan(&items).Error
+	return items, err
 }
 
 func (r *chatMessageRepository) DeleteBySession(ctx context.Context, sessionID string) error {
