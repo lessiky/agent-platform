@@ -50,6 +50,14 @@ func (f *fakeTemplateRepo) ListForRoute(ctx context.Context) ([]model.ModelTempl
 	return out, nil
 }
 
+func (f *fakeTemplateRepo) List(ctx context.Context, filter repository.ModelListFilter) ([]model.ModelTemplate, int64, error) {
+	var out []model.ModelTemplate
+	for _, t := range f.byID {
+		out = append(out, *t)
+	}
+	return out, int64(len(out)), nil
+}
+
 // fakeQuotaRepo 配额仓储最小假实现 (M10.3 向量路径: 无配额 = 不限)
 type fakeQuotaRepo struct {
 	repository.ModelQuotaRepository
@@ -309,6 +317,53 @@ func TestSayHi_Embed_UpstreamError(t *testing.T) {
 	}
 	if !strings.Contains(view.Error, "404") {
 		t.Errorf("error = %s, want 包含 '404'", view.Error)
+	}
+}
+
+// TestGetList_EmbedFlag 模型列表/详情视图标记向量专用模板 is_embed_model (M10.3, 供模型管理识别展示)
+func TestGetList_EmbedFlag(t *testing.T) {
+	cipher := mustCipher(t)
+	tpl := newTestTemplate(t, cipher, "openai", "bge-m3")
+	tpl.Name = "dhzq-bge-m3"
+	other := newTestTemplate(t, cipher, "openai", "gpt-4o")
+	other.ID = "m-2"
+	other.Name = "chat-tpl"
+	repo := &fakeTemplateRepo{
+		byID:   map[string]*model.ModelTemplate{"m-1": tpl, "m-2": other},
+		byName: map[string]*model.ModelTemplate{"dhzq-bge-m3": tpl},
+	}
+	s := NewModelTemplateService(
+		repo, &fakeQuotaRepo{}, &fakeUsageRepo{}, nil, nil, cipher, 0, 0, 0, StaticTemplateSource("dhzq-bge-m3"),
+	).(*modelTemplateService)
+
+	got, _, err := s.Get(context.Background(), "m-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.IsEmbedModel {
+		t.Errorf("Get embed: is_embed_model = false, want true")
+	}
+	gotOther, _, err := s.Get(context.Background(), "m-2")
+	if err != nil {
+		t.Fatalf("Get chat: %v", err)
+	}
+	if gotOther.IsEmbedModel {
+		t.Errorf("Get chat: is_embed_model = true, want false")
+	}
+
+	items, total, err := s.List(context.Background(), repository.ModelListFilter{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("List = %d items, total=%d; want 2, 2", len(items), total)
+	}
+	flags := map[string]bool{}
+	for _, it := range items {
+		flags[it.Name] = it.IsEmbedModel
+	}
+	if !flags["dhzq-bge-m3"] || flags["chat-tpl"] {
+		t.Errorf("List is_embed_model = %v, want only dhzq-bge-m3", flags)
 	}
 }
 

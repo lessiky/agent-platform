@@ -39,10 +39,13 @@ type ModelTemplate struct {
 	HealthLastCheck *time.Time                  `json:"health_last_check"`
 	HealthLatencyMs *int                        `json:"health_latency_ms"`
 	LastError       string                      `gorm:"type:varchar(512)" json:"last_error"`
-	CreatedBy       *string                     `gorm:"type:uuid" json:"created_by"`
-	CreatedAt       time.Time                   `json:"created_at"`
-	UpdatedAt       time.Time                   `json:"updated_at"`
-	DeletedAt       gorm.DeletedAt              `gorm:"index" json:"-"`
+	// IsEmbedModel 向量专用模板 (M10.3): 名称即当前生效的记忆语义检索模型 (平台设置优先, MEMORY_EMBED_MODEL 兜底);
+	// 不参与对话路由; 视图计算字段, 不入库
+	IsEmbedModel bool           `gorm:"-" json:"is_embed_model"`
+	CreatedBy    *string        `gorm:"type:uuid" json:"created_by"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 func (ModelTemplate) TableName() string {

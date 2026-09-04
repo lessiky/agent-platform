@@ -268,6 +268,7 @@ func (s *modelTemplateService) Create(ctx context.Context, req CreateModelReques
 			t = fresh
 		}
 	}
+	t.IsEmbedModel = s.isEmbedTemplate(t)
 	return t, s.apiKeyView(t), nil
 }
 
@@ -277,12 +278,20 @@ func (s *modelTemplateService) Get(ctx context.Context, id string) (*model.Model
 	if err != nil {
 		return nil, nil, err
 	}
+	t.IsEmbedModel = s.isEmbedTemplate(t)
 	return t, s.apiKeyView(t), nil
 }
 
 // List 分页列表 (q 搜索, provider/status/tag 过滤)
 func (s *modelTemplateService) List(ctx context.Context, filter repository.ModelListFilter) ([]model.ModelTemplate, int64, error) {
-	return s.templates.List(ctx, filter)
+	items, total, err := s.templates.List(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range items {
+		items[i].IsEmbedModel = s.isEmbedTemplate(&items[i])
+	}
+	return items, total, nil
 }
 
 // Update 更新配置; 连接参数变化时自动重新探测
@@ -351,6 +360,7 @@ func (s *modelTemplateService) Update(ctx context.Context, id string, req Update
 			t = fresh
 		}
 	}
+	t.IsEmbedModel = s.isEmbedTemplate(t)
 	return t, s.apiKeyView(t), nil
 }
 

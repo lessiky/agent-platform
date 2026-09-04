@@ -30,6 +30,9 @@ type DatabaseConfig struct {
 	Password string `env:"DB_PASSWORD"`
 	Name     string `env:"DB_NAME" envDefault:"agent_platform"`
 	SSLMode  string `env:"DB_SSLMODE" envDefault:"disable"`
+	// SQLLogLevel GORM SQL 日志级别: silent / error / warn / info
+	// info 输出全部 SQL (调试用, 日志刷屏); warn (默认) 仅输出错误与超过 SlowThreshold 的慢查询
+	SQLLogLevel string `env:"DB_SQL_LOG_LEVEL" envDefault:"warn"`
 }
 type JWTConfig struct {
 	Secret     string `env:"JWT_SECRET"`

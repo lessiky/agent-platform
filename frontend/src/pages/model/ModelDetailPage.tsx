@@ -15,6 +15,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import { ArrowLeftOutlined, EditOutlined, MessageOutlined, ReloadOutlined } from '@ant-design/icons';
@@ -120,12 +121,13 @@ export function ModelDetailPage() {
   const onSayHi = async () => {
     if (!id) return;
     setSayingHi(true);
+    const isEmbedModel = !!template?.is_embed_model;
     try {
       const res = await modelApi.sayHi(id);
       const result = res.data;
       if (result?.ok) {
         modal.success({
-          title: '模型回复正常',
+          title: isEmbedModel ? '向量模型验证通过' : '模型回复正常',
           width: 560,
           content: (
             <div>
@@ -143,8 +145,13 @@ export function ModelDetailPage() {
                 {result.content || '(空回复)'}
               </pre>
               <div style={{ color: 'var(--color-text-secondary)', fontSize: 12, marginTop: 8 }}>
-                延迟 {result.latency_ms}ms · tokens {result.total_tokens ?? '-'} · finish_reason{' '}
-                {result.finish_reason || '-'}
+                延迟 {result.latency_ms}ms · tokens {result.total_tokens ?? '-'}
+                {!isEmbedModel && (
+                  <>
+                    {' · finish_reason '}
+                    {result.finish_reason || '-'}
+                  </>
+                )}
                 {result.model ? ` · 实际模型 ${result.model}` : ''}
               </div>
             </div>
@@ -152,7 +159,7 @@ export function ModelDetailPage() {
         });
       } else {
         modal.error({
-          title: '模型回复异常',
+          title: isEmbedModel ? '向量模型验证失败' : '模型回复异常',
           width: 560,
           content: <div>{result?.error || '未知错误'}</div>,
         });
@@ -227,7 +234,14 @@ export function ModelDetailPage() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <h2 style={{ margin: 0 }}>{template?.name ?? '模型详情'}</h2>
+        <Space size={8} align="center">
+          <h2 style={{ margin: 0 }}>{template?.name ?? '模型详情'}</h2>
+          {template?.is_embed_model && (
+            <Tooltip title="向量专用模型 (平台设置-记忆语义检索), 发送Hi消息将调用 /embeddings 验证向量生成, 不参与对话路由">
+              <Tag color="purple">向量模型</Tag>
+            </Tooltip>
+          )}
+        </Space>
         <Space>
           <Link to="/models">
             <Button icon={<ArrowLeftOutlined />}>返回</Button>

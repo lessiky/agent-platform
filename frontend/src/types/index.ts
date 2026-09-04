@@ -414,6 +414,8 @@ export interface ModelTemplate {
   health_last_check: string | null;
   health_latency_ms: number | null;
   last_error: string;
+  // 向量专用模板 (平台设置-记忆语义检索模型生效值, 不参与对话路由)
+  is_embed_model?: boolean;
   created_by: string | null;
   created_at: string;
   updated_at: string;

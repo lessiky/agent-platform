@@ -95,7 +95,14 @@ export function ModelListPage() {
       width: 180,
       render: (name: string, record) => (
         <div>
-          <Link to={`/models/${record.id}`}>{name}</Link>
+          <Space size={4}>
+            <Link to={`/models/${record.id}`}>{name}</Link>
+            {record.is_embed_model && (
+              <Tooltip title="向量专用模型 (平台设置-记忆语义检索), 不参与对话路由">
+                <Tag color="purple" style={{ marginRight: 0 }}>向量</Tag>
+              </Tooltip>
+            )}
+          </Space>
           <div style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
             {MODEL_PROVIDER_MAP[record.provider]?.label ?? record.provider}
             {record.tags?.length > 0 && (

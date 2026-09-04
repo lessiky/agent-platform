@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"agent-platform/internal/config"
@@ -16,6 +17,20 @@ import (
 
 var DB *gorm.DB
 
+// gormLogLevel 将 DB_SQL_LOG_LEVEL 配置映射为 GORM 日志级别
+func gormLogLevel(s string) logger.LogLevel {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "silent", "off":
+		return logger.Silent
+	case "error":
+		return logger.Error
+	case "info":
+		return logger.Info
+	default:
+		return logger.Warn
+	}
+}
+
 func Init(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s TimeZone=Asia/Shanghai",
@@ -25,11 +40,13 @@ func Init(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	var err error
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
 		// Writer 使用 applogger.StdWriter() (原始 stdout + logs/ 日志文件), 使 SQL 日志一并落盘
+		// LogLevel 由 DB_SQL_LOG_LEVEL 控制 (默认 warn): 后台 watchdog/健康检查每 15-60s 轮询,
+		// 若用 info 会把每条 SQL 都打进日志 (单日可达数十 MB); 需要全量 SQL 排查时设为 info
 		Logger: logger.New(applogger.PrintfWriter{W: applogger.StdWriter()}, logger.Config{
 			SlowThreshold:             200 * time.Millisecond,
 			IgnoreRecordNotFoundError: true,
 			Colorful:                  false,
-			LogLevel:                  logger.Info,
+			LogLevel:                  gormLogLevel(cfg.SQLLogLevel),
 		}),
 		// 必须开启 PrepareStmt: gorm postgres driver 的 AutoMigrate 检查已存在表时,
 		// 会把 pgx.QueryExecModeSimpleProtocol 预置到 Statement.Vars 头部, 使 LIMIT
