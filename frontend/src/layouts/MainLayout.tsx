@@ -4,6 +4,7 @@ import { Avatar, Dropdown, Layout, Menu, Space, Typography, type MenuProps } fro
 import {
   AppstoreOutlined,
   AuditOutlined,
+  BookOutlined,
   ClusterOutlined,
   DashboardOutlined,
   LogoutOutlined,
@@ -80,6 +81,10 @@ export function MainLayout() {
         label: '工作流',
       },
     ];
+    // 知识库: 按 kb:read 权限显示 (PRD 7)
+    if (permissions.includes('kb:read')) {
+      items.push({ key: '/kb', icon: <BookOutlined />, label: '知识库' });
+    }
     // 系统管理: 按权限显示 (user:manage / role:manage)
     const systemItems: NonNullable<MenuProps['items']> = [];
     if (permissions.includes('platform:manage')) {
@@ -110,6 +115,8 @@ export function MainLayout() {
               ? '/skills'
               : location.pathname.startsWith('/workflows')
               ? '/workflows'
+              : location.pathname.startsWith('/kb')
+              ? '/kb'
               : location.pathname;
 
   const onLogout = () => {

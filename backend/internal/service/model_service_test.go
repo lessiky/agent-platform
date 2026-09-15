@@ -86,7 +86,7 @@ func newTestModelService(t *testing.T, templates map[string]*model.ModelTemplate
 	if err != nil {
 		t.Fatalf("NewAesGCM: %v", err)
 	}
-	return NewModelTemplateService(&fakeTemplateRepo{byID: templates}, nil, nil, nil, nil, cipher, 0, 0, 0, nil).(*modelTemplateService)
+	return NewModelTemplateService(&fakeTemplateRepo{byID: templates}, nil, nil, nil, nil, cipher, 0, 0, 0, nil, nil).(*modelTemplateService)
 }
 
 func newTestTemplate(t *testing.T, cipher *crypto.AesGCM, provider, modelName string) *model.ModelTemplate {
@@ -333,7 +333,7 @@ func TestGetList_EmbedFlag(t *testing.T) {
 		byName: map[string]*model.ModelTemplate{"dhzq-bge-m3": tpl},
 	}
 	s := NewModelTemplateService(
-		repo, &fakeQuotaRepo{}, &fakeUsageRepo{}, nil, nil, cipher, 0, 0, 0, StaticTemplateSource("dhzq-bge-m3"),
+		repo, &fakeQuotaRepo{}, &fakeUsageRepo{}, nil, nil, cipher, 0, 0, 0, StaticTemplateSource("dhzq-bge-m3"), nil,
 	).(*modelTemplateService)
 
 	got, _, err := s.Get(context.Background(), "m-1")
@@ -384,7 +384,7 @@ func newEmbedTestService(t *testing.T, tpl *model.ModelTemplate, embedName strin
 		&fakeTemplateRepo{byID: byID, byName: byName},
 		&fakeQuotaRepo{},
 		usage,
-		nil, nil, cipher, 0, 0, 0, StaticTemplateSource(embedName),
+		nil, nil, cipher, 0, 0, 0, StaticTemplateSource(embedName), nil,
 	).(*modelTemplateService)
 	return s, usage
 }

@@ -41,8 +41,11 @@ type ModelTemplate struct {
 	LastError       string                      `gorm:"type:varchar(512)" json:"last_error"`
 	// IsEmbedModel 向量专用模板 (M10.3): 名称即当前生效的记忆语义检索模型 (平台设置优先, MEMORY_EMBED_MODEL 兜底);
 	// 不参与对话路由; 视图计算字段, 不入库
-	IsEmbedModel bool           `gorm:"-" json:"is_embed_model"`
-	CreatedBy    *string        `gorm:"type:uuid" json:"created_by"`
+	IsEmbedModel bool `gorm:"-" json:"is_embed_model"`
+	// IsRerankModel 重排专用模板 (M11): 名称即当前生效的知识库 rerank 模型 (平台设置优先, KB_RERANK_MODEL 兜底);
+	// 不参与对话路由; 视图计算字段, 不入库
+	IsRerankModel bool           `gorm:"-" json:"is_rerank_model"`
+	CreatedBy     *string        `gorm:"type:uuid" json:"created_by"`
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`

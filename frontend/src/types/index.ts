@@ -75,6 +75,9 @@ export interface AgentConfig {
   max_tool_rounds?: number;
   tools?: string[];
   skills_usage_mode?: string; // 技能注入模式 (M9)
+  knowledge_categories?: string[]; // 绑定的知识库分类 (M11)
+  knowledge_categories_readonly?: string[]; // 只读绑定分类 (M11.5, 可检索不可写入)
+  kb_search_mode?: string; // 知识库检索模式 (M11: auto/tool/off, 空 = auto)
 }
 
 export interface Agent {
@@ -184,6 +187,9 @@ export interface CreateAgentRequest {
   mcp_ids?: string[];
   skills?: string[]; // 绑定的技能包 (M9)
   skills_usage_mode?: string; // 技能注入模式 (M9)
+  knowledge_categories?: string[]; // 绑定的知识库分类 (M11)
+  knowledge_categories_readonly?: string[]; // 只读绑定分类 (M11.5, 可检索不可写入; 与上互斥)
+  kb_search_mode?: string; // 知识库检索模式 (M11: auto/tool/off, 空 = auto)
   model_id?: string;
   team_id?: string;
 }
@@ -702,6 +708,101 @@ export interface BoundSkillView {
   missing_tools: string[];
 }
 
+// ---------- 知识库 (M11) ----------
+export type KBStatus = 'active' | 'archived';
+export type KBSource = 'manual' | 'chat_summary';
+export type KBSearchMode = 'auto' | 'tool' | 'off';
+
+export interface KBCategory {
+  id: string;
+  name: string;
+  description: string;
+  parent_id: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  // 列表项扩展
+  document_count?: number;
+}
+
+export interface KBDocument {
+  id: string;
+  category_id: string;
+  title: string;
+  content: string;
+  source: KBSource;
+  source_session_id: string | null;
+  source_agent_id: string | null;
+  status: KBStatus;
+  access_count: number;
+  last_accessed_at: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  // 列表项扩展
+  category_name?: string;
+  // M11.5: 分块数 (0/缺省 = 未分块或未启用分块)
+  chunk_count?: number;
+}
+
+// M11.5 事项 4: 分块视图 (序号/内容/向量化状态)
+export interface KBChunkView {
+  chunk_index: number;
+  content: string;
+  vectorized: boolean;
+  updated_at: string;
+}
+
+export interface KBSearchHit {
+  id: string;
+  category_id: string;
+  category_name: string;
+  title: string;
+  excerpt: string;
+  // M11.5: 最佳命中块 (块级向量召回; 短条目/关键词路径为空)
+  matched_chunk?: string | null;
+  score: number;
+  updated_at: string;
+}
+
+// Agent 知识库绑定视图 (M11: 详情页签; M11.5: 只读标志 + 父级名展示 「父/子」 路径)
+export interface AgentKBCategoryView {
+  id: string;
+  name: string;
+  description: string;
+  document_count: number;
+  read_only: boolean;
+  parent_name?: string;
+}
+
+// 向量回填任务 (M11.5: 后台异步任务, 状态持久化)
+export type KBBackfillTaskStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export interface KBBackfillTask {
+  id: string;
+  status: KBBackfillTaskStatus;
+  total: number;
+  done: number;
+  failed: number;
+  last_error: string;
+  created_by: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface AgentKBView {
+  kb_search_mode: string;
+  categories: AgentKBCategoryView[];
+}
+
+// 一键总结草稿 (M11: LLM 结构化输出, 前端确认后经 POST /kb/documents 入库)
+export interface KBSummaryDraft {
+  title: string;
+  content: string;
+  suggested_category_id?: string;
+  categories: AgentKBCategoryView[];
+}
 // ---------- 平台设置 ----------
 // 平台名 + 平台图标 (icon 为 base64 data URL, 空串 = 使用内置默认图标)
 // + 记忆语义检索向量模型 (memory_embed_model 空串 = 跟随 MEMORY_EMBED_MODEL 环境变量)
@@ -713,5 +814,14 @@ export interface PlatformSettings {
   memory_embed_model_effective?: string;
   memory_extract_model?: string;
   memory_extract_model_effective?: string;
+  // 知识库 (M11): 总开关 + 向量/重排/总结模型 (空串 = 跟随对应环境变量)
+  kb_enabled?: boolean | null;
+  kb_enabled_effective?: boolean;
+  kb_embed_model?: string;
+  kb_embed_model_effective?: string;
+  kb_rerank_model?: string;
+  kb_rerank_model_effective?: string;
+  kb_summary_model?: string;
+  kb_summary_model_effective?: string;
   updated_at?: string;
 }

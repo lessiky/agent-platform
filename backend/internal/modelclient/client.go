@@ -602,3 +602,93 @@ func (c *Client) Embed(ctx context.Context, model string, inputs []string) (*Emb
 		TotalTokens: parsed.Usage.TotalTokens,
 	}, nil
 }
+
+// ============ Rerank (M11 知识库) ============
+
+// RerankResult 一次重排调用结果 (vLLM / Xinference /rerank 兼容格式)
+type RerankResult struct {
+	// Scores 与 documents 顺序一致的相关度分数 (按响应 index 重排)
+	Scores []float64
+	Model  string
+}
+
+// Rerank 调用 POST {endpoint}/rerank 对文档列表按与 query 的相关度打分 (M11 知识库两阶段检索)。
+// 请求/响应采用 vLLM 与 Xinference 兼容格式:
+//
+//	请求: {"model", "query", "documents"}
+//	响应: {"results": [{"index", "relevance_score"}], ...}
+//
+// 仅支持 openai/custom 提供商 (OpenAI 兼容端点); 结果按 index 重排后与 documents 顺序一致。
+func (c *Client) Rerank(ctx context.Context, model string, query string, documents []string) (*RerankResult, error) {
+	if c.Provider != "openai" && c.Provider != "custom" {
+		return nil, fmt.Errorf("provider %s 的 rerank 接口暂不支持 (仅 openai/custom)", c.Provider)
+	}
+	if len(documents) == 0 {
+		return nil, fmt.Errorf("rerank documents is empty")
+	}
+	base := strings.TrimRight(strings.TrimSpace(c.Endpoint), "/")
+	if base == "" {
+		base = DefaultEndpoints["openai"]
+	}
+
+	payload := map[string]interface{}{
+		"model":     model,
+		"query":     query,
+		"documents": documents,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/rerank", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("rerank request failed: %s", truncate(err.Error(), 300))
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	switch {
+	case resp.StatusCode == http.StatusOK:
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return nil, fmt.Errorf("unauthorized: HTTP %d (API Key 无效?)", resp.StatusCode)
+	default:
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 300))
+	}
+
+	if isHTMLResponse(respBody) {
+		return nil, fmt.Errorf("rerank response is HTML instead of JSON: endpoint path may be incorrect (missing /v1?), address: %s", base+"/rerank")
+	}
+	var parsed struct {
+		Model   string `json:"model"`
+		Results []struct {
+			Index          int     `json:"index"`
+			RelevanceScore float64 `json:"relevance_score"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("rerank response parse failed: %s", truncate(err.Error(), 200))
+	}
+	if len(parsed.Results) == 0 {
+		return nil, fmt.Errorf("rerank response has no results")
+	}
+
+	scores := make([]float64, len(documents))
+	seen := make(map[int]bool, len(parsed.Results))
+	for i := range parsed.Results {
+		r := &parsed.Results[i]
+		if r.Index < 0 || r.Index >= len(documents) || seen[r.Index] {
+			return nil, fmt.Errorf("rerank result index invalid or duplicated: %d (documents=%d)", r.Index, len(documents))
+		}
+		seen[r.Index] = true
+		scores[r.Index] = r.RelevanceScore
+	}
+	return &RerankResult{Scores: scores, Model: parsed.Model}, nil
+}

@@ -54,7 +54,7 @@ var _ repository.AuditLogRepository = (*fakePlatformAudit)(nil)
 func TestPlatformServiceGetDefaults(t *testing.T) {
 	src := NewMutableTemplateSource("env-embed")
 	extractSrc := NewMutableTemplateSource("env-extract")
-	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{Embed: src, EmbedSink: src, Extract: extractSrc, ExtractSink: extractSrc})
+	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{Embed: src, EmbedSink: src, Extract: extractSrc, ExtractSink: extractSrc}, nil, 0)
 	info, err := svc.Get(context.Background())
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -84,7 +84,7 @@ func TestPlatformServiceGetDefaults(t *testing.T) {
 func TestPlatformServiceUpdateName(t *testing.T) {
 	repo := &fakePlatformRepo{}
 	audit := &fakePlatformAudit{}
-	svc := NewPlatformService(repo, audit, PlatformModelSources{})
+	svc := NewPlatformService(repo, audit, PlatformModelSources{}, nil, 0)
 
 	userID := "user-1"
 	info, err := svc.Update(context.Background(), UpdatePlatformRequest{Name: "  智能体平台 "}, &userID, "alice", "127.0.0.1")
@@ -110,7 +110,7 @@ func TestPlatformServiceUpdateName(t *testing.T) {
 }
 
 func TestPlatformServiceUpdateInvalidName(t *testing.T) {
-	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{})
+	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{}, nil, 0)
 
 	if _, err := svc.Update(context.Background(), UpdatePlatformRequest{Name: "   "}, nil, "alice", ""); err == nil {
 		t.Fatal("empty name: want validation error")
@@ -129,7 +129,7 @@ func TestPlatformServiceUpdateIcon(t *testing.T) {
 	validIcon := "data:image/png;base64," + png
 
 	repo := &fakePlatformRepo{}
-	svc := NewPlatformService(repo, &fakePlatformAudit{}, PlatformModelSources{})
+	svc := NewPlatformService(repo, &fakePlatformAudit{}, PlatformModelSources{}, nil, 0)
 
 	info, err := svc.Update(context.Background(), UpdatePlatformRequest{Name: "Agent 管理平台", Icon: &validIcon}, nil, "alice", "")
 	if err != nil {
@@ -160,7 +160,7 @@ func TestPlatformServiceUpdateIcon(t *testing.T) {
 }
 
 func TestPlatformServiceUpdateIconRejected(t *testing.T) {
-	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{})
+	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{}, nil, 0)
 
 	cases := map[string]string{
 		"非 data URL": "https://example.com/logo.png",
@@ -182,7 +182,7 @@ func TestPlatformServiceUpdateEmbedModel(t *testing.T) {
 	repo := &fakePlatformRepo{}
 	audit := &fakePlatformAudit{}
 	src := NewMutableTemplateSource("env-embed")
-	svc := NewPlatformService(repo, audit, PlatformModelSources{Embed: src, EmbedSink: src})
+	svc := NewPlatformService(repo, audit, PlatformModelSources{Embed: src, EmbedSink: src}, nil, 0)
 
 	userID := "user-1"
 	v := "text-embed-3"
@@ -235,7 +235,7 @@ func TestPlatformServiceUpdateEmbedModel(t *testing.T) {
 }
 
 func TestPlatformServiceUpdateEmbedModelRejected(t *testing.T) {
-	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{})
+	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{}, nil, 0)
 	long := strings.Repeat("x", PlatformEmbedModelMaxLen+1)
 	if _, err := svc.Update(context.Background(), UpdatePlatformRequest{Name: "Agent 管理平台", MemoryEmbedModel: &long}, nil, "alice", ""); err == nil {
 		t.Fatal("overlong embed model: want validation error")
@@ -248,7 +248,7 @@ func TestPlatformServiceUpdateExtractModel(t *testing.T) {
 	audit := &fakePlatformAudit{}
 	embedSrc := NewMutableTemplateSource("env-embed")
 	extractSrc := NewMutableTemplateSource("env-extract")
-	svc := NewPlatformService(repo, audit, PlatformModelSources{Embed: embedSrc, EmbedSink: embedSrc, Extract: extractSrc, ExtractSink: extractSrc})
+	svc := NewPlatformService(repo, audit, PlatformModelSources{Embed: embedSrc, EmbedSink: embedSrc, Extract: extractSrc, ExtractSink: extractSrc}, nil, 0)
 
 	userID := "user-1"
 	v := "extract-gpt"
@@ -296,7 +296,7 @@ func TestPlatformServiceUpdateExtractModel(t *testing.T) {
 }
 
 func TestPlatformServiceUpdateExtractModelRejected(t *testing.T) {
-	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{})
+	svc := NewPlatformService(&fakePlatformRepo{}, &fakePlatformAudit{}, PlatformModelSources{}, nil, 0)
 	long := strings.Repeat("x", PlatformEmbedModelMaxLen+1)
 	if _, err := svc.Update(context.Background(), UpdatePlatformRequest{Name: "Agent 管理平台", MemoryExtractModel: &long}, nil, "alice", ""); err == nil {
 		t.Fatal("overlong extract model: want validation error")
@@ -308,7 +308,7 @@ func TestPlatformServiceSyncModelSettings(t *testing.T) {
 	repo := &fakePlatformRepo{settings: &model.PlatformSettings{ID: "1", Name: model.DefaultPlatformName, MemoryEmbedModel: "db-embed", MemoryExtractModel: "db-extract"}}
 	embedSrc := NewMutableTemplateSource("env-embed")
 	extractSrc := NewMutableTemplateSource("env-extract")
-	svc := NewPlatformService(repo, &fakePlatformAudit{}, PlatformModelSources{Embed: embedSrc, EmbedSink: embedSrc, Extract: extractSrc, ExtractSink: extractSrc})
+	svc := NewPlatformService(repo, &fakePlatformAudit{}, PlatformModelSources{Embed: embedSrc, EmbedSink: embedSrc, Extract: extractSrc, ExtractSink: extractSrc}, nil, 0)
 
 	if embedSrc.Current() != "env-embed" || extractSrc.Current() != "env-extract" {
 		t.Fatalf("pre-sync Current = %q/%q, want env-embed/env-extract", embedSrc.Current(), extractSrc.Current())

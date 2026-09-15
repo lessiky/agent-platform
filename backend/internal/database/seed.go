@@ -30,6 +30,8 @@ func SeedPermissionsAndRoles(db *gorm.DB) error {
 		{Code: "workflow:execute", Name: "工作流执行", Resource: "workflow", Action: "execute"},
 		{Code: "skill:read", Name: "技能读", Resource: "skill", Action: "read"},
 		{Code: "skill:write", Name: "技能写", Resource: "skill", Action: "write"},
+		{Code: "kb:read", Name: "知识库读", Resource: "kb", Action: "read"},
+		{Code: "kb:write", Name: "知识库写", Resource: "kb", Action: "write"},
 		{Code: "user:manage", Name: "用户管理", Resource: "user", Action: "manage"},
 		{Code: "role:manage", Name: "角色管理", Resource: "role", Action: "manage"},
 		{Code: "platform:manage", Name: "平台管理", Resource: "platform", Action: "manage"},
@@ -72,7 +74,7 @@ func SeedPermissionsAndRoles(db *gorm.DB) error {
 			rolePermCodes["operator"] = append(rolePermCodes["operator"], perm.Code)
 		}
 		switch perm.Code {
-		case "agent:read", "mcp:read", "model:read", "workflow:read", "skill:read":
+		case "agent:read", "mcp:read", "model:read", "workflow:read", "skill:read", "kb:read":
 			rolePermCodes["user"] = append(rolePermCodes["user"], perm.Code)
 		}
 	}
@@ -114,7 +116,7 @@ func SeedPermissionsAndRoles(db *gorm.DB) error {
 		log.Printf("RBAC seed: assigned default role 'user' to existing user %s", u.Username)
 	}
 
-	log.Println("RBAC seed completed (15 permissions, admin/operator/user roles, demo_user=admin)")
+	log.Println("RBAC seed completed (17 permissions, admin/operator/user roles, demo_user=admin)")
 	return nil
 }
 

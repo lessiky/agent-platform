@@ -9,6 +9,48 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// KBConfig 知识库模块配置 (M11)
+type KBConfig struct {
+	// Enabled 总开关 (false 时所有 Agent 不注入/不注册工具, 管理端 CRUD 不受影响)
+	Enabled bool `env:"KB_ENABLED" envDefault:"true"`
+	// RetrievalTimeout 注入路径检索超时, 超时跳过注入 (检索故障永不阻断对话)
+	RetrievalTimeout time.Duration `env:"KB_RETRIEVAL_TIMEOUT" envDefault:"500ms"`
+	// TopK 注入 top-K
+	TopK int `env:"KB_TOP_K" envDefault:"3"`
+	// CharBudget 注入段总字符预算
+	CharBudget int `env:"KB_CHAR_BUDGET" envDefault:"4000"`
+	// MaxCandidates 单 Agent 检索候选集上限 (关键词路径)
+	MaxCandidates int `env:"KB_MAX_CANDIDATES" envDefault:"500"`
+	// EmbedModel embedding 模型模板名 (OpenAI 兼容 /embeddings); 空 = 不启用向量召回
+	EmbedModel string `env:"KB_EMBED_MODEL"`
+	// RerankModel rerank 模型模板名 (OpenAI 兼容 /rerank, vLLM/Xinference 兼容格式); 空 = 不重排
+	RerankModel string `env:"KB_RERANK_MODEL"`
+	// RecallSize 召回阶段候选数 (向量召回 / 关键词预筛上限, 亦为 rerank 候选上限)
+	RecallSize int `env:"KB_RECALL_SIZE" envDefault:"20"`
+	// RerankTimeout rerank 调用超时, 超时按召回序排序
+	RerankTimeout time.Duration `env:"KB_RERANK_TIMEOUT" envDefault:"300ms"`
+	// VectorDim 向量列维度 (列级固定, 保存 embedding 模型时探测校验维度匹配)
+	VectorDim int `env:"KB_VECTOR_DIM" envDefault:"1024"`
+	// SummaryModel 一键总结模型模板名; 空 = Agent 当前模型
+	SummaryModel string `env:"KB_SUMMARY_MODEL"`
+	// SummaryMaxTurns 总结输入消息上限
+	SummaryMaxTurns int `env:"KB_SUMMARY_MAX_TURNS" envDefault:"20"`
+	// SummaryTimeout 一键总结生成超时 (LLM 长文本输出, 慢模型可调大; 前端请求超时 150s 须大于此值)
+	SummaryTimeout time.Duration `env:"KB_SUMMARY_TIMEOUT" envDefault:"120s"`
+	// MaxDocBytes 单条目正文大小上限 (字节)
+	MaxDocBytes int `env:"KB_MAX_DOC_BYTES" envDefault:"204800"`
+	// ---- M11.5 条目分块 (块级向量; KB_CHUNK_ENABLED=false 回退整条向量路径) ----
+	// ChunkEnabled 分块路径总开关 (false = 整条向量路径全量回退)
+	ChunkEnabled bool `env:"KB_CHUNK_ENABLED" envDefault:"true"`
+	// ChunkSize 分块目标大小 (rune)
+	ChunkSize int `env:"KB_CHUNK_SIZE" envDefault:"500"`
+	// ChunkOverlap 相邻块重叠 (rune)
+	ChunkOverlap int `env:"KB_CHUNK_OVERLAP" envDefault:"50"`
+	// ChunkThreshold 分块阈值: 正文 ≤ 阈值整条 1 块
+	ChunkThreshold int `env:"KB_CHUNK_THRESHOLD" envDefault:"1000"`
+	// ChunkRecallMult 块级召回候选数 = KB_RECALL_SIZE × 本值
+	ChunkRecallMult int `env:"KB_CHUNK_RECALL_MULT" envDefault:"2"`
+}
 type Config struct {
 	Server   ServerConfig
 	Database DatabaseConfig
@@ -16,6 +58,7 @@ type Config struct {
 	MCP      MCPConfig
 	Model    ModelConfig
 	Memory   MemoryConfig
+	KB       KBConfig
 }
 
 type ServerConfig struct {
@@ -57,8 +100,8 @@ type ModelConfig struct {
 	HealthCheckInterval time.Duration `env:"MODEL_HEALTH_INTERVAL" envDefault:"1m"`
 	// CheckTimeout 单次连通性探测超时
 	CheckTimeout time.Duration `env:"MODEL_CHECK_TIMEOUT" envDefault:"5s"`
-	// ChatTimeout 单次对话调用超时 (LLM 生成耗时较长, 需长于探测超时)
-	ChatTimeout time.Duration `env:"MODEL_CHAT_TIMEOUT" envDefault:"120s"`
+	// ChatTimeout 单次对话调用超时 (LLM 生成耗时较长, 需长于探测超时; 慢模型长输出可调大, 前端对应请求超时须大于此值)
+	ChatTimeout time.Duration `env:"MODEL_CHAT_TIMEOUT" envDefault:"300s"`
 }
 
 // MemoryConfig 记忆模块配置 (M10.1 检索注入 / M10.2 自动抽取 + 滚动摘要 / M10.3 语义检索)

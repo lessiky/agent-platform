@@ -1,10 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { App, Button, Card, Checkbox, Empty, Input, List, Popconfirm, Space, Spin, Tag, Tooltip } from 'antd';
-import { AuditOutlined, BulbOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, StopOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons';
+import { App, Button, Card, Checkbox, Empty, Input, List, Modal, Popconfirm, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd';
+import { AuditOutlined, BookOutlined, BulbOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, StopOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons';
 import { agentApi, chatStream, type ChatStreamEventPayload } from '@/api/agent';
+import { kbApi } from '@/api/kb';
 import { getErrorMessage } from '@/api/client';
-import type { ChatMCPCall, ChatMessage, ChatPendingApproval, ChatSession, ChatSkillCall } from '@/types';
+import type {
+  AgentKBCategoryView,
+  ChatMCPCall,
+  ChatMessage,
+  ChatPendingApproval,
+  ChatSession,
+  ChatSkillCall,
+  KBSummaryDraft,
+} from '@/types';
+import { useHasPermission } from '@/store/auth-store';
 import { timeAgo } from '@/utils/format';
 import { MathText } from '@/components/common/MathText';
 
@@ -60,6 +70,19 @@ export function ChatPanel({ agentId }: { agentId: string }) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameSaving, setRenameSaving] = useState(false);
+  // 一键总结入库 (M11): 草稿状态 + 确认入库
+  const hasKbWrite = useHasPermission()('kb:write');
+  const [kbBound, setKbBound] = useState(false); // Agent 是否绑定了知识库分类
+  const [kbWritable, setKbWritable] = useState(false); // M11.5: 是否存在读写绑定 (只读绑定不可写入)
+  const [summarizing, setSummarizing] = useState(false); // 生成草稿中 (LLM 调用, 最长 ~30s)
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [summarySaving, setSummarySaving] = useState(false);
+  const [summaryDraft, setSummaryDraft] = useState<{
+    title: string;
+    content: string;
+    categoryId: string;
+  } | null>(null);
+  const [summaryCategories, setSummaryCategories] = useState<AgentKBCategoryView[]>([]);
 
   const loadSessions = useCallback(async (keepActive: boolean) => {
     try {
@@ -88,6 +111,26 @@ export function ChatPanel({ agentId }: { agentId: string }) {
       setMessagesLoading(false);
     }
   }, [agentId, message]);
+
+  // Agent 绑定分类加载 (总结入库按钮显隐; 服务端按当前绑定重新鉴权)
+  useEffect(() => {
+    let cancelled = false;
+    agentApi
+      .listKB(agentId)
+      .then((res) => {
+        if (!cancelled) {
+          const categories = res.data?.categories ?? [];
+          setKbBound(categories.length > 0);
+          setKbWritable(categories.some((c) => !c.read_only));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setKbBound(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
 
   useEffect(() => {
     loadSessions(false);
@@ -173,6 +216,71 @@ export function ChatPanel({ agentId }: { agentId: string }) {
     }
   };
 
+
+  // 一键总结入库 (M11): 生成草稿 -> 弹框编辑确认 -> POST /kb/documents (chat_summary 分支服务端校验)
+  const onSummarize = async () => {
+    if (!activeId || summarizing) return;
+    setSummarizing(true);
+    try {
+      const res = await agentApi.kbSummary(agentId, activeId);
+      const draft: KBSummaryDraft | undefined = res.data;
+      if (!draft || !draft.title || !draft.content) {
+        message.error('总结结果为空, 请重试');
+        return;
+      }
+      const categories = draft.categories ?? [];
+      setSummaryCategories(categories);
+      setSummaryDraft({
+        title: draft.title,
+        content: draft.content,
+        categoryId: draft.suggested_category_id || (categories[0]?.id ?? ''),
+      });
+      setSummaryOpen(true);
+    } catch (err) {
+      message.error(getErrorMessage(err, '生成总结草稿失败'));
+    } finally {
+      setSummarizing(false);
+    }
+  };
+
+  const onConfirmSummary = async () => {
+    if (!summaryDraft || !activeId || summarySaving) return;
+    const title = summaryDraft.title.trim();
+    const content = summaryDraft.content.trim();
+    if (!title) {
+      message.warning('标题不能为空');
+      return;
+    }
+    if (!content) {
+      message.warning('正文不能为空');
+      return;
+    }
+    if (!summaryDraft.categoryId) {
+      message.warning('请选择目标分类');
+      return;
+    }
+    setSummarySaving(true);
+    try {
+      await kbApi.createDocument({
+        category_id: summaryDraft.categoryId,
+        title,
+        content,
+        source: 'chat_summary',
+        source_session_id: activeId,
+        source_agent_id: agentId,
+      });
+      message.success('已入库, 绑定的 Agent 下一轮对话即可检索到');
+      setSummaryOpen(false);
+      setSummaryDraft(null);
+    } catch (err) {
+      message.error(getErrorMessage(err, '入库失败'));
+    } finally {
+      setSummarySaving(false);
+    }
+  };
+
+  const userMsgCount = messages.filter((m) => m.role === 'user').length;
+  const canSummarize = hasKbWrite && kbBound && !!activeId && !sending && userMsgCount > 0;
 
   // SSE 阶段事件 -> 进度卡状态 (final/error 不处理, 由 onSend 收尾清理)
   const handleStreamEvent = useCallback((evt: ChatStreamEventPayload) => {
@@ -387,9 +495,26 @@ export function ChatPanel({ agentId }: { agentId: string }) {
         style={{ flex: 1 }}
         title={activeSession ? activeSession.title || '对话' : '新对话'}
         extra={
-          <Checkbox checked={showThinking} onChange={(e) => onToggleShowThinking(e.target.checked)}>
-            显示思考过程
-          </Checkbox>
+          <Space>
+            {canSummarize && (
+              <Tooltip
+                title={
+                  kbWritable
+                    ? '将本会话提炼为知识条目草稿, 确认后写入 Agent 绑定的知识库分类'
+                    : '未绑定可读写的知识分类 (只读绑定不可写入)'
+                }
+              >
+                <span>
+                  <Button size='small' icon={<BookOutlined />} loading={summarizing} disabled={!kbWritable} onClick={onSummarize}>
+                    总结入库
+                  </Button>
+                </span>
+              </Tooltip>
+            )}
+            <Checkbox checked={showThinking} onChange={(e) => onToggleShowThinking(e.target.checked)}>
+              显示思考过程
+            </Checkbox>
+          </Space>
         }
         styles={{ body: { display: 'flex', flexDirection: 'column', height: 'calc(100% - 39px)' } }}
       >
@@ -500,6 +625,53 @@ export function ChatPanel({ agentId }: { agentId: string }) {
           </Space.Compact>
         </div>
       </Card>
+
+      {/* 一键总结入库: 草稿编辑 (标题/正文) + 目标分类 (仅 Agent 绑定分类, 默认建议项) */}
+      <Modal
+        title="总结入库 — 草稿确认"
+        open={summaryOpen}
+        onOk={onConfirmSummary}
+        okText="确认入库"
+        cancelText="取消"
+        okButtonProps={{ disabled: !summaryDraft?.categoryId }}
+        confirmLoading={summarySaving}
+        width={680}
+        onCancel={() => setSummaryOpen(false)}
+        destroyOnClose
+      >
+        <Space direction='vertical' size='middle' style={{ width: '100%' }}>
+          <Typography.Text type='secondary'>
+            草稿由模型基于会话最近 20 条消息生成, 请确认后入库; 入库后写入所选分类并关联本会话。
+          </Typography.Text>
+          {summaryDraft && (
+            <>
+              <Input
+                addonBefore="标题"
+                maxLength={100}
+                showCount
+                value={summaryDraft.title}
+                onChange={(e) => setSummaryDraft({ ...summaryDraft, title: e.target.value })}
+              />
+              <Select
+                style={{ width: '100%' }}
+                placeholder="选择目标分类"
+                value={summaryDraft.categoryId || undefined}
+                onChange={(v) => setSummaryDraft({ ...summaryDraft, categoryId: v })}
+                options={summaryCategories.map((c) => ({
+                  value: c.id,
+                  label: c.description ? `${c.name} — ${c.description}` : c.name,
+                }))}
+              />
+              <Input.TextArea
+                rows={10}
+                placeholder="知识条目正文 (markdown)"
+                value={summaryDraft.content}
+                onChange={(e) => setSummaryDraft({ ...summaryDraft, content: e.target.value })}
+              />
+            </>
+          )}
+        </Space>
+      </Modal>
     </div>
   );
 }

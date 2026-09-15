@@ -72,6 +72,7 @@ func main() {
 		cfg.Model.ChatTimeout,
 		cfg.Memory.EmbedTimeout,
 		service.StaticTemplateSource(embedName),
+		service.StaticTemplateSource(""),
 	)
 	memRepo := repository.NewMemoryRepository()
 

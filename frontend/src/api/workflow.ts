@@ -146,7 +146,7 @@ export const workflowApi = {
     apiClient.post<ApiEnvelope<{ valid: boolean }>>('/workflows/validate', { definition }),
   // AI 自动生成: 自然语言描述 -> 校验通过的 DAG 草稿 (不落库); LLM 生成耗时较长, 单独放宽超时
   aiGenerate: (data: { description: string }) =>
-    apiClient.post<ApiEnvelope<AIGenerateResult>>('/workflows/ai-generate', data, { timeout: 180000 }),
+    apiClient.post<ApiEnvelope<AIGenerateResult>>('/workflows/ai-generate', data, { timeout: 320000 }),
   activate: (id: string) => apiClient.post<ApiEnvelope<Workflow>>(`/workflows/${id}/activate`),
   archive: (id: string) => apiClient.post<ApiEnvelope<Workflow>>(`/workflows/${id}/archive`),
   updateSchedule: (id: string, data: { enabled: boolean; cron?: string; input?: Record<string, unknown> }) =>

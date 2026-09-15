@@ -20,6 +20,7 @@ import { ModelListPage } from '@/pages/model/ModelListPage';
 import { ModelFormPage } from '@/pages/model/ModelFormPage';
 import { ModelDetailPage } from '@/pages/model/ModelDetailPage';
 import { SkillListPage } from '@/pages/skill/SkillListPage';
+import { KbListPage } from '@/pages/kb/KbListPage';
 import { SkillDetailPage } from '@/pages/skill/SkillDetailPage';
 import { UserListPage } from '@/pages/system/UserListPage';
 import { RoleListPage } from '@/pages/system/RoleListPage';
@@ -60,6 +61,14 @@ export const router = createBrowserRouter([
       { path: 'models/:id/edit', element: <ModelFormPage /> },
       { path: 'skills', element: <SkillListPage /> },
       { path: 'skills/:id', element: <SkillDetailPage /> },
+      {
+        path: 'kb',
+        element: (
+          <RequirePermission code="kb:read">
+            <KbListPage />
+          </RequirePermission>
+        ),
+      },
       { path: 'workflows', element: <WorkflowListPage /> },
       // 工作流看板已并入概览页, 旧地址重定向保持链接可用
       { path: 'workflows/dashboard', element: <Navigate to="/dashboard?tab=workflow" replace /> },

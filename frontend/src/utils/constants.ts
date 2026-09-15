@@ -1,4 +1,4 @@
-import type { AgentStatus, ApprovalSource, ApprovalStatus, InstanceStatus, LogLevel, MCPStatus, MCPTransport, ModelProvider, ModelStatus, SkillStatus, SkillsUsageMode } from '@/types';
+import type { AgentStatus, ApprovalSource, ApprovalStatus, InstanceStatus, KBSearchMode, KBSource, KBStatus, LogLevel, MCPStatus, MCPTransport, ModelProvider, ModelStatus, SkillStatus, SkillsUsageMode } from '@/types';
 
 // Agent 状态展示
 export const AGENT_STATUS_MAP: Record<AgentStatus, { label: string; color: string }> = {
@@ -85,3 +85,22 @@ export const SKILL_USAGE_MODE_MAP: Record<SkillsUsageMode, { label: string; hint
 
 // 平台设置默认值 (与后端 DefaultPlatformName 保持一致, 拉取失败时兜底展示)
 export const DEFAULT_PLATFORM_NAME = 'Agent 管理平台';
+
+// 知识库条目状态展示 (M11)
+export const KB_STATUS_MAP: Record<KBStatus, { label: string; color: string }> = {
+  active: { label: '启用', color: 'green' },
+  archived: { label: '已归档', color: 'default' },
+};
+
+// 知识库条目来源展示 (M11)
+export const KB_SOURCE_MAP: Record<KBSource, { label: string; color: string }> = {
+  manual: { label: '人工录入', color: 'blue' },
+  chat_summary: { label: '对话总结', color: 'purple' },
+};
+
+// 知识库检索模式展示 (M11, Agent 表单/详情页用)
+export const KB_SEARCH_MODE_MAP: Record<KBSearchMode, { label: string; hint: string }> = {
+  auto: { label: '自动 (注入 + 工具)', hint: '每轮自动注入 top-K 知识参考, 并注册 search_knowledge 工具' },
+  tool: { label: '仅工具按需检索', hint: '仅注册 search_knowledge 工具, 模型按需检索' },
+  off: { label: '关闭', hint: '不启用知识库检索' },
+};

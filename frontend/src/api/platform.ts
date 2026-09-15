@@ -11,6 +11,11 @@ export const platformApi = {
     icon: string;
     memory_embed_model?: string;
     memory_extract_model?: string;
+    // 知识库 (M11): 总开关 + 向量/重排/总结模型; 模型空串 = 跟随对应环境变量
+    kb_enabled?: boolean;
+    kb_embed_model?: string;
+    kb_rerank_model?: string;
+    kb_summary_model?: string;
   }) =>
     apiClient.put<ApiEnvelope<PlatformSettings>>('/platform/settings', data),
 };

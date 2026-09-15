@@ -94,3 +94,11 @@ func NotFound(c *gin.Context, msg string) {
 		Message: msg,
 	})
 }
+
+// Gone 资源已弃用 (410)
+func Gone(c *gin.Context, msg string) {
+	c.JSON(http.StatusGone, Response{
+		Code:    "gone",
+		Message: msg,
+	})
+}

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/postgres:pg16
     environment:
       POSTGRES_DB: agent_platform
       POSTGRES_USER: postgres
@@ -40,7 +40,7 @@ services:
       MODEL_CREDENTIALS_KEY: ${MODEL_CREDENTIALS_KEY:-f3a1c8d2e9b47056a0d3c2b1e8f7a6954c3b2a1d0e9f8a7b6c5d4e3f2a1b0c9d}
       MODEL_HEALTH_INTERVAL: 1m
       MODEL_CHECK_TIMEOUT: 5s
-      MODEL_CHAT_TIMEOUT: 120s
+      MODEL_CHAT_TIMEOUT: 300s
       # 记忆模块 (检索注入 / 自动抽取 + 滚动摘要)
       MEMORY_ENABLED: "true"
       MEMORY_MAX_INJECT: "10"
@@ -56,6 +56,31 @@ services:
       # 向量模型: 空 = 纯关键词检索 (语义检索不生效); 也可在平台设置页配置 (平台设置优先, 免重启生效)
       MEMORY_EMBED_MODEL: ${MEMORY_EMBED_MODEL:-}
       MEMORY_EMBED_TIMEOUT: 10s
+      # 知识库模块 (M11: 分类/条目管理 + 检索注入 + 一键总结)
+      KB_ENABLED: "true"
+      KB_RETRIEVAL_TIMEOUT: 500ms
+      KB_TOP_K: "3"
+      KB_CHAR_BUDGET: "4000"
+      KB_MAX_CANDIDATES: "500"
+      # 向量化模型: 空 = 不启用向量召回 (纯关键词检索); 也可在平台设置页配置 (平台设置优先, 免重启生效)
+      KB_EMBED_MODEL: ${KB_EMBED_MODEL:-}
+      # rerank 模型: 空 = 按召回序排序; 也可在平台设置页配置 (平台设置优先, 免重启生效)
+      KB_RERANK_MODEL: ${KB_RERANK_MODEL:-}
+      KB_RECALL_SIZE: "20"
+      KB_RERANK_TIMEOUT: 300ms
+      # 向量列维度 (列级固定; 保存 embedding 模型时探测校验, 不匹配拒绝保存)
+      KB_VECTOR_DIM: "1024"
+      # 一键总结模型: 空 = Agent 当前模型; 也可在平台设置页配置 (平台设置优先, 免重启生效)
+      KB_SUMMARY_MODEL: ${KB_SUMMARY_MODEL:-}
+      KB_SUMMARY_MAX_TURNS: "20"
+      KB_SUMMARY_TIMEOUT: 120s
+      KB_MAX_DOC_BYTES: "204800"
+      # 条目分块 (M11.5: 块级向量; KB_CHUNK_ENABLED=false 回退整条向量路径)
+      KB_CHUNK_ENABLED: "true"
+      KB_CHUNK_SIZE: "500"
+      KB_CHUNK_OVERLAP: "50"
+      KB_CHUNK_THRESHOLD: "1000"
+      KB_CHUNK_RECALL_MULT: "2"
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     volumes:

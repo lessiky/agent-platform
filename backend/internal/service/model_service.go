@@ -157,6 +157,11 @@ type ModelTemplateService interface {
 	// 未找到/不可用时返回错误 (调用方降级为纯关键词检索, 不回落 Agent 路由);
 	// 用量经 consumeUsage 计入 ModelUsageLog / 配额 (与对话调用同路径计量)
 	EmbedForMemory(ctx context.Context, templateName string, inputs []string) ([][]float64, error)
+	// EmbedForKB 知识库向量计算 (M11): 定向 templateName 模板, 语义与 EmbedForMemory 相同
+	EmbedForKB(ctx context.Context, templateName string, inputs []string) ([][]float64, error)
+	// RerankForKB 知识库重排 (M11 两阶段检索二阶段): 定向 templateName 模板,
+	// 返回与 docs 顺序一致的相关度分数; 未找到/不可用时返回错误 (调用方按召回序降级, 不回落 Agent 路由)
+	RerankForKB(ctx context.Context, templateName, query string, docs []string) ([]float64, error)
 	// RouteAndChatStream 流式版 RouteAndChat: 模型思考增量 (reasoning) 经 onReasoning 实时回调,
 	// 路由/故障转移/配额/用量行为与 RouteAndChat 相同; 正文与工具调用累积后整体返回
 	RouteAndChatStream(ctx context.Context, agentID string, messages []modelclient.ChatMessage, tools []modelclient.ChatToolDef, gen modelclient.GenOptions, onReasoning func(delta string)) (*ChatOutcome, error)
@@ -171,10 +176,11 @@ type modelTemplateService struct {
 	health      repository.ModelHealthLogRepository
 	agents      repository.AgentRepository
 	cipher      *crypto.AesGCM
-	checkTime   time.Duration
-	chatTime    time.Duration
-	embedTime   time.Duration
-	embedSource TemplateSource // M10.3: 向量专用模板名的运行时来源 (不参与对话路由; 平台设置页可免重启切换)
+	checkTime    time.Duration
+	chatTime     time.Duration
+	embedTime    time.Duration
+	embedSource  TemplateSource // M10.3: 向量专用模板名的运行时来源 (不参与对话路由; 平台设置页可免重启切换)
+	rerankSource TemplateSource // M11: 重排专用模板名的运行时来源 (不参与对话路由; 平台设置页可免重启切换)
 }
 
 func NewModelTemplateService(
@@ -188,6 +194,7 @@ func NewModelTemplateService(
 	chatTimeout time.Duration,
 	embedTimeout time.Duration,
 	embedSource TemplateSource,
+	rerankSource TemplateSource,
 ) ModelTemplateService {
 	if checkTimeout <= 0 {
 		checkTimeout = 5 * time.Second
@@ -199,16 +206,17 @@ func NewModelTemplateService(
 		embedTimeout = 10 * time.Second
 	}
 	return &modelTemplateService{
-		templates:   templates,
-		quotas:      quotas,
-		usage:       usage,
-		health:      health,
-		agents:      agents,
-		cipher:      cipher,
-		checkTime:   checkTimeout,
-		chatTime:    chatTimeout,
-		embedTime:   embedTimeout,
-		embedSource: embedSource,
+		templates:    templates,
+		quotas:       quotas,
+		usage:        usage,
+		health:       health,
+		agents:       agents,
+		cipher:       cipher,
+		checkTime:    checkTimeout,
+		chatTime:     chatTimeout,
+		embedTime:    embedTimeout,
+		embedSource:  embedSource,
+		rerankSource: rerankSource,
 	}
 }
 
@@ -269,6 +277,7 @@ func (s *modelTemplateService) Create(ctx context.Context, req CreateModelReques
 		}
 	}
 	t.IsEmbedModel = s.isEmbedTemplate(t)
+	t.IsRerankModel = s.isRerankTemplate(t)
 	return t, s.apiKeyView(t), nil
 }
 
@@ -279,6 +288,7 @@ func (s *modelTemplateService) Get(ctx context.Context, id string) (*model.Model
 		return nil, nil, err
 	}
 	t.IsEmbedModel = s.isEmbedTemplate(t)
+	t.IsRerankModel = s.isRerankTemplate(t)
 	return t, s.apiKeyView(t), nil
 }
 
@@ -290,6 +300,7 @@ func (s *modelTemplateService) List(ctx context.Context, filter repository.Model
 	}
 	for i := range items {
 		items[i].IsEmbedModel = s.isEmbedTemplate(&items[i])
+		items[i].IsRerankModel = s.isRerankTemplate(&items[i])
 	}
 	return items, total, nil
 }
@@ -361,6 +372,7 @@ func (s *modelTemplateService) Update(ctx context.Context, id string, req Update
 		}
 	}
 	t.IsEmbedModel = s.isEmbedTemplate(t)
+	t.IsRerankModel = s.isRerankTemplate(t)
 	return t, s.apiKeyView(t), nil
 }
 
@@ -400,6 +412,9 @@ func (s *modelTemplateService) SayHi(ctx context.Context, id string) (*HiView, e
 	}
 	if s.isEmbedTemplate(t) {
 		return s.sayHiEmbed(ctx, t), nil
+	}
+	if s.isRerankTemplate(t) {
+		return s.sayHiRerank(ctx, t), nil
 	}
 	if t.Provider != "openai" && t.Provider != "custom" {
 		return &HiView{OK: false, Error: fmt.Sprintf("provider %s 的对话接口暂不支持 (仅 openai/custom)", t.Provider)}, nil
@@ -679,8 +694,8 @@ func (s *modelTemplateService) Route(ctx context.Context) (*RouteResult, error) 
 	skipped := make([]RouteSkip, 0, len(templates))
 	for i := range templates {
 		t := templates[i]
-		if s.isEmbedTemplate(&t) {
-			skipped = append(skipped, RouteSkip{Name: t.Name, Model: t.Model, Reason: "embedding template (非对话模型)"})
+		if s.isNonChatTemplate(&t) {
+			skipped = append(skipped, RouteSkip{Name: t.Name, Model: t.Model, Reason: "embedding/rerank template (非对话模型)"})
 			continue
 		}
 		if reason, skip := s.skipReason(ctx, &t); skip {
@@ -720,7 +735,7 @@ func (s *modelTemplateService) RouteAndConsume(ctx context.Context, agentID stri
 	if preferred != "" {
 		for i := range templates {
 			t := templates[i]
-			if s.isEmbedTemplate(&t) {
+			if s.isNonChatTemplate(&t) {
 				continue
 			}
 			if !strings.EqualFold(t.Name, preferred) && !strings.EqualFold(t.Model, preferred) {
@@ -737,7 +752,7 @@ func (s *modelTemplateService) RouteAndConsume(ctx context.Context, agentID stri
 	if selected == nil {
 		for i := range templates {
 			t := templates[i]
-			if s.isEmbedTemplate(&t) {
+			if s.isNonChatTemplate(&t) {
 				continue
 			}
 			if _, skip := s.skipReason(ctx, &t); skip {
@@ -937,7 +952,7 @@ func (s *modelTemplateService) orderedCandidates(ctx context.Context, agentID st
 	}
 	var available []*model.ModelTemplate
 	for i := range templates {
-		if s.isEmbedTemplate(&templates[i]) {
+		if s.isNonChatTemplate(&templates[i]) {
 			continue
 		}
 		if _, skip := s.skipReason(ctx, &templates[i]); skip {
@@ -977,7 +992,7 @@ func (s *modelTemplateService) orderedCandidates(ctx context.Context, agentID st
 	return ordered
 }
 
-// chatClient 构建对话用客户端 (对话超时可配置 MODEL_CHAT_TIMEOUT, 默认 120s, 长于探测超时)
+// chatClient 构建对话用客户端 (对话超时可配置 MODEL_CHAT_TIMEOUT, 默认 300s, 长于探测超时)
 func (s *modelTemplateService) chatClient(t *model.ModelTemplate) (*modelclient.Client, error) {
 	apiKey := ""
 	if len(t.APIKey) > 0 {
@@ -997,6 +1012,20 @@ func (s *modelTemplateService) isEmbedTemplate(t *model.ModelTemplate) bool {
 	}
 	name := s.embedSource.Current()
 	return name != "" && strings.EqualFold(t.Name, name)
+}
+
+// isRerankTemplate 是否为重排专用模板 (M11): 该模板不参与对话路由 (Route / 故障转移均排除)
+func (s *modelTemplateService) isRerankTemplate(t *model.ModelTemplate) bool {
+	if s.rerankSource == nil {
+		return false
+	}
+	name := s.rerankSource.Current()
+	return name != "" && strings.EqualFold(t.Name, name)
+}
+
+// isNonChatTemplate 非对话模板 (embed / rerank 专用), 对话路由一律排除
+func (s *modelTemplateService) isNonChatTemplate(t *model.ModelTemplate) bool {
+	return s.isEmbedTemplate(t) || s.isRerankTemplate(t)
 }
 
 // embedClient 构建向量计算用客户端 (超时 MEMORY_EMBED_TIMEOUT, 默认 10s)
@@ -1046,6 +1075,110 @@ func (s *modelTemplateService) EmbedForMemory(ctx context.Context, templateName 
 	}
 	s.consumeUsage(ctx, t, "", res.TotalTokens, latency, true, "")
 	return res.Vectors, nil
+}
+
+// EmbedForKB 知识库向量计算 (M11): 实现与 EmbedForMemory 相同, 独立命名便于日志/审计区分调用来源
+func (s *modelTemplateService) EmbedForKB(ctx context.Context, templateName string, inputs []string) ([][]float64, error) {
+	name := strings.TrimSpace(templateName)
+	if name == "" {
+		return nil, fmt.Errorf("embedding model template not configured (平台设置 kb_embed_model / KB_EMBED_MODEL)")
+	}
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("embedding input is empty")
+	}
+	t, err := s.templates.GetByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, fmt.Errorf("embedding model template %q not found", name)
+	}
+	if reason, skip := s.skipReason(ctx, t); skip {
+		return nil, fmt.Errorf("embedding model template %q unavailable: %s", name, reason)
+	}
+	client, err := s.embedClient(t)
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	res, err := client.Embed(ctx, t.Model, inputs)
+	latency := int(time.Since(start).Milliseconds())
+	if err != nil {
+		s.consumeUsage(ctx, t, "", 0, latency, false, truncate(err.Error(), 300))
+		return nil, err
+	}
+	s.consumeUsage(ctx, t, "", res.TotalTokens, latency, true, "")
+	return res.Vectors, nil
+}
+
+// rerankClient 构建重排调用客户端 (超时上限与向量计算一致, 实际超时由调用方 ctx 控制:
+// 注入路径 KB_RERANK_TIMEOUT 300ms, 超时按召回序降级)
+func (s *modelTemplateService) rerankClient(t *model.ModelTemplate) (*modelclient.Client, error) {
+	apiKey := ""
+	if len(t.APIKey) > 0 {
+		plain, err := s.cipher.Decrypt(t.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt api key (key changed?)")
+		}
+		apiKey = string(plain)
+	}
+	return modelclient.New(t.Provider, t.Endpoint, apiKey, s.embedTime), nil
+}
+
+// RerankForKB 知识库重排 (M11 两阶段检索二阶段): 定向 templateName 模板,
+// 返回与 docs 顺序一致的相关度分数; 用量经 consumeUsage 计入 ModelUsageLog / 配额
+func (s *modelTemplateService) RerankForKB(ctx context.Context, templateName, query string, docs []string) ([]float64, error) {
+	name := strings.TrimSpace(templateName)
+	if name == "" {
+		return nil, fmt.Errorf("rerank model template not configured (平台设置 kb_rerank_model / KB_RERANK_MODEL)")
+	}
+	if len(docs) == 0 {
+		return nil, nil
+	}
+	t, err := s.templates.GetByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, fmt.Errorf("rerank model template %q not found", name)
+	}
+	if reason, skip := s.skipReason(ctx, t); skip {
+		return nil, fmt.Errorf("rerank model template %q unavailable: %s", name, reason)
+	}
+	client, err := s.rerankClient(t)
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	res, err := client.Rerank(ctx, t.Model, query, docs)
+	latency := int(time.Since(start).Milliseconds())
+	if err != nil {
+		s.consumeUsage(ctx, t, "", 0, latency, false, truncate(err.Error(), 300))
+		return nil, err
+	}
+	s.consumeUsage(ctx, t, "", 0, latency, true, "")
+	return res.Scores, nil
+}
+
+// sayHiRerank 重排专用模板 (M11): 真实调用一次 /rerank, 验证模型能否正常打分 (不消费配额, 不改变模板状态)
+func (s *modelTemplateService) sayHiRerank(ctx context.Context, t *model.ModelTemplate) *HiView {
+	if t.Provider != "openai" && t.Provider != "custom" {
+		return &HiView{OK: false, Error: fmt.Sprintf("provider %s 的 rerank 接口暂不支持 (仅 openai/custom)", t.Provider)}
+	}
+	client, err := s.rerankClient(t)
+	if err != nil {
+		return &HiView{OK: false, Error: err.Error()}
+	}
+	start := time.Now()
+	res, err := client.Rerank(ctx, t.Model, "知识库连通性检测", []string{"这是用于验证 rerank 模型连通性的测试文档。"})
+	latency := int(time.Since(start).Milliseconds())
+	if err != nil {
+		return &HiView{OK: false, LatencyMs: latency, Error: truncate(err.Error(), 300)}
+	}
+	if len(res.Scores) == 0 {
+		return &HiView{OK: false, LatencyMs: latency, Error: "rerank 返回分数为空"}
+	}
+	return &HiView{OK: true, LatencyMs: latency, Model: res.Model}
 }
 
 // consumeUsage 配额消费 + 用量日志 (每次模型调用计次, 失败调用同样消耗)

@@ -72,6 +72,10 @@ func Init(cfg config.DatabaseConfig) (*gorm.DB, error) {
 }
 
 func AutoMigrate(db *gorm.DB) error {
+	// M11 知识库 (pgvector): 先确保 vector 扩展 (幂等), 后续 AutoMigrate 才能创建 vector(1024) 列
+	if err := db.Exec("CREATE EXTENSION IF NOT EXISTS vector").Error; err != nil {
+		return fmt.Errorf("failed to create vector extension: %w", err)
+	}
 	err := db.AutoMigrate(
 		&model.User{},
 		&model.Role{},
@@ -105,6 +109,11 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.Skill{},
 		&model.SkillFile{},
 		&model.SkillAgentBinding{},
+		&model.KBCategory{},
+		&model.KBDocument{},
+		&model.AgentKBBinding{},
+		&model.KBChunk{},
+		&model.KBBackfillTask{},
 		&model.PlatformSettings{},
 	)
 	if err != nil {
@@ -143,6 +152,18 @@ func AutoMigrate(db *gorm.DB) error {
 		}
 	}
 
+	// M11 知识库: 向量召回 HNSW 部分索引 (幂等; 仅覆盖已向量化条目)
+	if err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_kb_doc_embedding ON kb_documents USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL`).Error; err != nil {
+		return fmt.Errorf("failed to create kb_documents embedding index: %w", err)
+	}
+	// M11.5 知识库: 分类树父级索引 (绑定作用域扩展 / 子级查询热路径)
+	if err := db.Exec("CREATE INDEX IF NOT EXISTS idx_kb_category_parent ON kb_categories (parent_id)").Error; err != nil {
+		return fmt.Errorf("failed to create kb_categories parent index: %w", err)
+	}
+	// M11.5 知识库: 块级向量召回 HNSW 部分索引 (幂等; 仅覆盖已向量化块)
+	if err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_kb_chunk_embedding ON kb_chunks USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL`).Error; err != nil {
+		return fmt.Errorf("failed to create kb_chunks embedding index: %w", err)
+	}
 	log.Println("Database migration completed")
 	return nil
 }

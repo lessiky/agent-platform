@@ -4,6 +4,7 @@ import type {
   Agent,
   AgentAPIKey,
   AgentBoundMCP,
+  AgentKBView,
   AgentInstance,
   AgentLog,
   AgentMetrics,
@@ -15,6 +16,8 @@ import type {
   ChatSession,
   CreateAgentRequest,
   DashboardData,
+  KBSearchHit,
+  KBSummaryDraft,
   LogQuery,
   Memory,
   MemoryListResult,
@@ -58,6 +61,21 @@ export const agentApi = {
 
   updateSkills: (id: string, skills: string[]) =>
     apiClient.put<ApiEnvelope<{ skills: BoundSkillView[] }>>(`/agents/${id}/skills`, { skills }),
+
+  // 知识库 (M11): 绑定分类视图 + Agent 作用域检索试算 (服务端按当前绑定重新鉴权)
+  listKB: (id: string) =>
+    apiClient.get<ApiEnvelope<AgentKBView>>(`/agents/${id}/kb`),
+
+  searchKB: (id: string, params: { query: string; top_k?: number }) =>
+    apiClient.get<ApiEnvelope<{ hits: KBSearchHit[] }>>(`/agents/${id}/kb/search`, { params }),
+
+  // 一键总结入库草稿 (M11): LLM 结构化输出 + 建议分类; 确认后走 POST /kb/documents 落库; 请求超时 150s (须大于后端 KB_SUMMARY_TIMEOUT, 默认 120s, 慢模型总结耗时长)
+  kbSummary: (id: string, sid: string, focus?: string) =>
+    apiClient.post<ApiEnvelope<KBSummaryDraft>>(
+      `/agents/${id}/sessions/${sid}/kb-summary`,
+      focus ? { focus } : {},
+      { timeout: 150000 },
+    ),
 
   listVersions: (id: string) =>
     apiClient.get<ApiEnvelope<{ items: AgentVersion[] }>>(`/agents/${id}/versions`),

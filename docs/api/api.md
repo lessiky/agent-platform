@@ -340,11 +340,14 @@
 | `mcp_ids` | string[] | 否 | 已存在的 MCP 服务器 ID | 绑定的 MCP（可用工具来源） |
 | `skills` | string[] | 否 | 已存在的技能 ID | 绑定的技能包（校验 `required_tools` ⊆ 可用工具集） |
 | `skills_usage_mode` | string | 否 | `metadata_injection` \| `full_injection` | 技能注入模式，默认 `metadata_injection` |
+| `knowledge_categories` | string[] | 否 | 已存在的 kb 分类 ID | 绑定的知识库分类 (M11, 读 + 写；M11.5 起绑定顶级分类自动含其全部子级)；空 = 不绑定 |
+| `knowledge_categories_readonly` | string[] | 否 | 已存在的 kb 分类 ID；与 `knowledge_categories` 交集非空 → 400 | 只读绑定分类 (M11.5: 可被检索, 禁止总结入库写入该分类及其子级)；不传 = 全部读写 |
+| `kb_search_mode` | string | 否 | `auto` \| `tool` \| `off` | 知识库检索模式 (M11)：`auto`（默认，自动注入 + `search_knowledge` 工具）/ `tool`（仅工具）/ `off`（不启用） |
 | `team_id` | string | 否 | - | 团队（预留） |
 | `simulate_traffic` | bool | 否 | 默认 false | 实例常驻时是否生成模拟流量 |
 
 - **出参**：`201 created`，`data` 为 `Agent` 对象（`version=1`，`status=idle`）。
-- **错误**：`400` 名称已存在 / 工具不在已发现工具列表 / 技能依赖工具缺失。
+- **错误**：`400` 名称已存在 / 工具不在已发现工具列表 / 技能依赖工具缺失 / `knowledge_categories` 与 `knowledge_categories_readonly` 交集非空 (M11.5)。
 
 ### 4.2 Agent 列表
 
@@ -361,7 +364,7 @@
 | `model_id` | string \| null | 关联模型模板 ID |
 | `status` | string | `idle` / `running` / `stopped` / `error` |
 | `version` | int | 当前版本号 |
-| `config` | object | 配置快照（`model`/`system_prompt`/`temperature`/`max_tokens`/`tools`/`max_tool_rounds`/`skills_usage_mode`/`simulate_traffic`） |
+| `config` | object | 配置快照（`model`/`system_prompt`/`temperature`/`max_tokens`/`tools`/`max_tool_rounds`/`skills_usage_mode`/`knowledge_categories`/`kb_search_mode`/`simulate_traffic`） |
 | `created_at` / `updated_at` | string | 时间 |
 
 ### 4.3 Agent 详情（含实例）
@@ -380,6 +383,8 @@
 - **入参**（JSON body，`UpdateAgentRequest`）：字段同「4.1 创建」，差异：
   - `mcp_ids` 为 `null` 表示绑定不变（空数组 `[]` = 清空绑定）
   - `skills` 为 `null` 表示关联不变（空数组 `[]` = 清空关联）
+  - `knowledge_categories` 为 `null` 表示绑定不变（空数组 `[]` = 清空绑定）
+  - `knowledge_categories_readonly` 为 `null` 表示只读绑定不变（空数组 `[]` = 清空只读绑定；M11.5）
 - **出参**：`200`，`data` 为更新后的 `Agent`（`version` 递增）。
 - **错误**：`400` 运行中禁止更新 / 工具或技能校验失败。
 
@@ -1630,6 +1635,14 @@
 | `memory_embed_model_effective` | string | 当前生效的向量模型名（平台设置优先，空时回退环境变量）；空 = 语义检索不生效（纯关键词检索） |
 | `memory_extract_model` | string | 记忆抽取/会话摘要 (M10.2) 用 ModelTemplate 名称；空串 = 跟随环境变量 `MEMORY_EXTRACT_MODEL` (再空 = Agent 当前模型) |
 | `memory_extract_model_effective` | string | 当前生效的抽取/摘要模型名（平台设置优先，空时回退环境变量）；空 = 使用 Agent 各自配置的模型 |
+| `kb_enabled` | bool \| null | 知识库总开关设置值；`null` = 跟随 `KB_ENABLED` 环境变量 |
+| `kb_enabled_effective` | bool | 当前生效的总开关（平台设置优先）；关闭后对话无知识注入、管理端 CRUD 仍可 |
+| `kb_embed_model` | string | 向量化（embedding）ModelTemplate 名称；空 = 跟随 `KB_EMBED_MODEL` 环境变量 |
+| `kb_embed_model_effective` | string | 当前生效的向量化模型名；空 = 向量路径不生效（降级关键词检索） |
+| `kb_rerank_model` | string | 重排（rerank）ModelTemplate 名称；空 = 跟随 `KB_RERANK_MODEL` 环境变量 |
+| `kb_rerank_model_effective` | string | 当前生效的 rerank 模型名；空 = 按召回序排序 |
+| `kb_summary_model` | string | 一键总结 ModelTemplate 名称；空 = 跟随 `KB_SUMMARY_MODEL` 环境变量（再空 = Agent 当前模型） |
+| `kb_summary_model_effective` | string | 当前生效的总结模型名；空 = Agent 当前模型 |
 | `updated_at` | string | 最近更新时间 `YYYY-MM-DD HH:mm:ss`（从未更新时省略） |
 
 ```json
@@ -1651,10 +1664,226 @@
 | `icon` | string \| null | 否 | base64 data URL, 原图 ≤ 1MB | `null` = 不修改；空串 = 清除自定义图标；其余须为 PNG / JPG / SVG / WebP / GIF 的 data URL |
 | `memory_embed_model` | string \| null | 否 | ≤ 64 字符 | 向量专用 ModelTemplate 名称（首尾空白自动去除）。`null` = 不修改；空串 = 跟随环境变量 `MEMORY_EMBED_MODEL`；其余 = 使用该名称。保存后**即时生效，无需重启**（运行时优先于环境变量；模板不存在或调用失败时自动降级纯关键词检索） |
 | `memory_extract_model` | string \| null | 否 | ≤ 64 字符 | 记忆抽取/会话摘要用 ModelTemplate 名称（首尾空白自动去除）。`null` = 不修改；空串 = 跟随环境变量 `MEMORY_EXTRACT_MODEL`（再空 = Agent 当前模型）；其余 = 使用该名称。保存后**即时生效，无需重启**（运行时优先于环境变量；模板不存在或不可用时回落 Agent 路由） |
+| `kb_enabled` | bool \| null | 否 | - | 知识库总开关（M11）。`null` = 不修改；`true`/`false` = 启用/停用（即时生效） |
+| `kb_embed_model` | string \| null | 否 | ≤ 64 字符 | 向量化 ModelTemplate 名称（首尾空白自动去除）。`null` = 不修改；空串 = 跟随 `KB_EMBED_MODEL` 环境变量；其余 = 使用该名称。保存时**维度探测**（须与 `kb_documents.embedding` 列维度一致）+ 连通性校验，不通过明确报错且保留原值 |
+| `kb_rerank_model` | string \| null | 否 | ≤ 64 字符 | rerank ModelTemplate 名称。`null` = 不修改；空串 = 跟随 `KB_RERANK_MODEL` 环境变量；其余 = 使用该名称。保存时**连通性探测**，不通过明确报错且保留原值 |
+| `kb_summary_model` | string \| null | 否 | ≤ 64 字符 | 一键总结 ModelTemplate 名称。`null` = 不修改；空串 = 跟随 `KB_SUMMARY_MODEL` 环境变量（再空 = Agent 当前模型）；其余 = 使用该名称 |
 
 - **出参**：`200`，`data` 为更新后的 `PlatformInfo`。
-- 变更写入审计日志（`action=platform.update`, `resource=platform`, detail 含名称前后值、图标是否变更、向量/抽取模型前后值）。
+- 变更写入审计日志（`action=platform.update`, `resource=platform`, detail 含名称前后值、图标是否变更、向量/抽取模型前后值、KB 总开关/向量化/rerank/总结模型前后值）。
 
+## 11. 知识库 KB
+
+> M11 知识库：分类 / 条目管理（归档 / 搜索）、Agent 分类绑定（读 + 写）、对话内知识注入 + `search_knowledge` 内置工具、一键总结入库、pgvector 两阶段检索（向量召回 + rerank 重排，四级降级：embed+rerank / 仅 embed / 仅 rerank / 纯关键词；任一步失败或超时向下降级，永不阻断对话）。M11.5：两级分类树（绑定顶级分类自动含其全部子级）+ 分类级只读绑定 + 向量回填后台任务化 + 条目分块 / 块级向量（`KB_CHUNK_ENABLED=false` 可全量回退整条向量路径）。
+
+### 11.1 分类列表
+
+- **接口**：`GET /api/v1/kb/categories`
+- **权限**：`kb:read`
+- **出参**：`200`，`data.items` 为 `KBCategoryView[]`（名称升序）：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `id` / `name` / `description` | string | 基本字段（名称 2-32 字符，描述 ≤200 字符） |
+| `parent_id` | string \| null | 父级分类 ID（M11.5 两级层级）：`null` = 顶级分类，非 null = 子级分类（子级不可再有子级） |
+| `document_count` | int | 该分类下 active 条目数 |
+| `created_by` | string \| null | 创建者 |
+| `created_at` / `updated_at` | string | 时间 |
+
+### 11.2 创建分类
+
+- **接口**：`POST /api/v1/kb/categories`
+- **权限**：`kb:write`
+- **入参**（JSON body）：
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+| ---- | ---- | ---- | ---- | ---- |
+| `name` | string | 是 | 2-32 字符 | 分类名称（同一父级下同级唯一，大小写不敏感，重名 400；不同父级下允许同名） |
+| `description` | string | 否 | ≤200 字符 | 描述 |
+| `parent_id` | string | 否 | 须指向已存在的顶级分类，否则 400 | 父级分类（M11.5）；缺省 / 空 = 创建顶级分类 |
+
+- **出参**：`201`，`data` 为 `KBCategory`。
+- 写操作（创建 / 更新 / 删除）均写入审计日志（`resource=kb_category`，detail 含 `parent_id` 及前后值）。
+
+### 11.3 更新分类
+
+- **接口**：`PUT /api/v1/kb/categories/:id`
+- **权限**：`kb:write`
+- **入参**：同 11.2，差异：`parent_id` 为**指针字段** —— 缺省字段 = 父级不变；`null` / `""` = 升为顶级分类；指向顶级分类 = 移动 / 降为子级（已有子级的分类不可降为子级，400，会突破两级约束；移动重新校验同级唯一）。**出参**：`200`，`data` 为更新后的 `KBCategory`。
+
+### 11.4 删除分类
+
+- **接口**：`DELETE /api/v1/kb/categories/:id`
+- **权限**：`kb:write`
+- **出参**：`200`。
+- **保护**：存在条目（含归档）或存在子级分类时 `409` 阻断，须先移出 / 删除条目、删除或迁移子级分类；硬删除前审计留痕。
+
+### 11.5 条目列表
+
+- **接口**：`GET /api/v1/kb/documents`
+- **权限**：`kb:read`
+- **入参**（query）：`page`（默认 1）/ `page_size`（默认 20）/ `category_id` / `keyword`（标题 + 正文）/ `source`（`manual`/`chat_summary`）/ `status`（`active`/`archived`）
+- **出参**：`200`，`data` 为 `{ items: KBDocument[], total, page, page_size }`
+
+`KBDocument` 字段：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `id` / `category_id` | string | 基本字段 |
+| `title` | string | 标题（2-100 字符） |
+| `content` | string | 正文（≤200KB，Markdown） |
+| `source` | string | `manual` / `chat_summary` |
+| `source_session_id` / `source_agent_id` | string \| null | 来源会话 / Agent（`source=chat_summary` 时非空） |
+| `status` | string | `active`（参与检索）/ `archived`（归档，不参与检索） |
+| `access_count` / `last_accessed_at` | - | 访问统计（Agent 检索命中后异步回写） |
+| `created_by` / `created_at` / `updated_at` | - | 审计字段 |
+
+### 11.6 创建条目
+
+- **接口**：`POST /api/v1/kb/documents`
+- **权限**：`kb:write`
+- **入参**（JSON body，`CreateDocumentRequest`）：
+
+| 字段 | 类型 | 必填 | 约束 | 说明 |
+| ---- | ---- | ---- | ---- | ---- |
+| `category_id` | string | 是 | 已存在分类 | 所属分类 |
+| `title` | string | 是 | 2-100 字符 | 标题 |
+| `content` | string | 是 | ≤200KB | 正文 |
+| `source` | string | 否 | `manual`（默认）/ `chat_summary` | 来源 |
+| `source_session_id` | string | 条件 | 会话须属于 `source_agent_id` 对应 Agent，否则 400 | `source=chat_summary` 时必填 |
+| `source_agent_id` | string | 条件 | `category_id` 须在 Agent **读写绑定作用域**内（M11.5：读写绑定分类 ∪ 其绑定的顶级分类的全部子级；只读绑定及其子级不可写），否则 403 | `source=chat_summary` 时必填 |
+
+- **出参**：`201`，`data` 为 `KBDocument`。
+- 创建 / 更新正文后**同事务重建分块**并触发**按块异步向量化**（M11.5 分块：长条目按 Markdown 结构切块、短条目 1 块；已配置 embedding 模型时）；失败不阻塞落库（可经 11.14 回填任务补算）。
+
+### 11.7 条目详情
+
+- **接口**：`GET /api/v1/kb/documents/:id`
+- **权限**：`kb:read`
+- **出参**：`200`，`data` 为 `KBDocumentView`：`KBDocument` 字段 + `category_name` + `chunk_count`（M11.5 分块数，`omitempty`，分块未启用或为 0 时不出现）。
+
+### 11.8 更新条目
+
+- **接口**：`PUT /api/v1/kb/documents/:id`
+- **权限**：`kb:write`
+- **入参**（JSON body，`UpdateDocumentRequest`；`null` 字段 = 不变）：`title` / `content` / `category_id`
+- **出参**：`200`，`data` 为更新后的 `KBDocumentView`；正文变更**同事务重建分块**（旧块删除 + 新块写入，向量 NULL）并重新触发按块异步向量化（M11.5）。
+
+### 11.9 删除条目
+
+- **接口**：`DELETE /api/v1/kb/documents/:id`
+- **权限**：`kb:write`
+- **出参**：`200`。
+
+### 11.10 归档 / 恢复
+
+- **接口**：`PATCH /api/v1/kb/documents/:id/status`
+- **权限**：`kb:write`
+- **入参**：`{"status": "active" | "archived"}`
+- **出参**：`200`，`data` 为更新后的 `KBDocument`。归档条目不参与检索，列表保留可恢复。
+
+### 11.11 条目分块列表（M11.5）
+
+- **接口**：`GET /api/v1/kb/documents/:id/chunks`
+- **权限**：`kb:read`
+- **出参**：`200`，`data`：`{ doc_id, chunk_count, chunks: KBChunkView[] }`；`404` 条目不存在
+
+`KBChunkView` 字段：`chunk_index`（序号，从 0 起）/ `content`（块内容）/ `vectorized`（是否已向量化）/ `updated_at`。管理预览 / 调试用；短条目（正文 ≤ `KB_CHUNK_THRESHOLD`）恒 1 块。
+
+### 11.12 平台试算检索（全局作用域）
+
+- **接口**：`GET /api/v1/kb/search`
+- **权限**：`kb:read`
+- **入参**（query）：`query`（空查询 = 按时间 / 使用度取近期条目）、`category_ids`（逗号分隔分类 ID，空 = 全部分类）、`top_k`（默认 5，上限 20）
+- **出参**：`200`，`data` 为 `{ hits: KBSearchHit[] }`
+
+`KBSearchHit` 字段：`id` / `category_id` / `category_name` / `title` / `excerpt`（摘录：长条目 = 最佳命中块，短条目 / 关键词路径 = 整条头部摘录，字符预算截断）/ `matched_chunk`（M11.5 最佳命中块全文；短条目 / 关键词路径为空）/ `score` / `updated_at`。
+
+- **作用域语义（M11.5）**：平台试算使用调用方**显式** `category_ids`，不自动扩展父子；Agent 侧路径（每轮注入 / `search_knowledge` / 11.16 试算）使用**绑定作用域** = 绑定分类 ∪ 绑定顶级分类的全部直接子级（只读绑定照常进入读作用域）。
+- **向量召回（M11.5 分块）**：`KB_CHUNK_ENABLED=true` 时走 `kb_chunks` HNSW 部分索引块级召回（候选数 = `KB_RECALL_SIZE × KB_CHUNK_RECALL_MULT`），按条目聚合取最佳块分后 top-K；`KB_CHUNK_ENABLED=false` 全量回退整条向量路径（`kb_documents.embedding`）。四级降级阶梯与关键词路径不变。
+
+### 11.13 回填状态（M11.5）
+
+- **接口**：`GET /api/v1/kb/backfill-status`
+- **权限**：`kb:read`
+- **出参**：`200`，`data`：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `unembedded` | int | 未向量化目标数（块模式 = 未向量化块数；整条模式 = 未向量化 active 条目数） |
+| `unit` | string | `chunk`（块模式）/ `document`（整条模式） |
+
+### 11.14 向量回填任务（M11.5）
+
+向量回填由同步请求改为**后台任务**（单飞、状态持久化 DB、服务重启可恢复）：
+
+- **启动**：`POST /api/v1/kb/backfill-tasks`，权限 `kb:write`；前置平台已配置 embedding 模型（未配置 400）；`201` 返回任务；已有 `pending`/`running` 任务 → `409`（`code=kb_task_active`，`data.task` = 运行中任务）
+- **列表**：`GET /api/v1/kb/backfill-tasks`，权限 `kb:read`；`200` `data.items` = 最近 20 条任务
+- **详情 + 进度**：`GET /api/v1/kb/backfill-tasks/:id`，权限 `kb:read`；`200` `data` = 任务；`404` 不存在
+- **取消**：`POST /api/v1/kb/backfill-tasks/:id/cancel`，权限 `kb:write`；仅 `pending`/`running` 可取消（已结束 400）；`running` 在**批边界协作取消**（当前批完成后停止）
+
+任务字段（`KBBackfillTask`）：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `id` | string | 任务 ID |
+| `status` | string | `pending` / `running` / `succeeded` / `failed` / `cancelled` |
+| `total` | int | 启动时统计的未向量化目标数（块 / 条目） |
+| `done` / `failed` | int | 已处理（成功 + 失败）/ 失败计数（批边界更新，单调不减） |
+| `last_error` | string \| null | 末次错误（失败 / 重启残留 `service restart`） |
+| `created_by` / `created_at` / `started_at` / `finished_at` | - | 审计字段 |
+
+- **重启恢复**：进程启动时残留 `pending`/`running` 任务标 `failed`（`last_error="service restart"`），之后可再启动。
+- **回填对象（M11.5）**：块模式按块回填 `kb_chunks`（批次 32）；整条模式（`KB_CHUNK_ENABLED=false`）按条目回填 `kb_documents.embedding`。向量写幂等（仅 NULL 时写）。
+- **旧端点（已弃用）**：`POST /api/v1/kb/documents/backfill-embeddings` → **`410 Gone`**（消息指明新端点 `POST /kb/backfill-tasks`）。
+
+### 11.15 Agent 知识库绑定视图
+
+- **接口**：`GET /api/v1/agents/:id/kb`
+- **权限**：`agent:read`
+- **出参**：`200`，`data`：`{ kb_search_mode, categories: AgentKBCategoryView[] }`（`kb_search_mode` 为归一后生效值：空 = `auto`）
+
+`AgentKBCategoryView` 字段：`id` / `name` / `description` / `document_count`（active 条目数）/ `read_only`（M11.5 只读绑定标志）/ `parent_name`（父级分类名，M11.5，顶级省略）。
+
+### 11.16 Agent 试算检索（绑定作用域）
+
+- **接口**：`GET /api/v1/agents/:id/kb/search?query=&top_k=`
+- **权限**：`agent:read`
+- **出参**：`200`，`data` 为 `{ hits: KBSearchHit[] }`。
+- 服务端按 **Agent 当前绑定分类重新鉴权**（不信任调用方传参）；无绑定分类的 Agent 返回空结果集。
+- **作用域扩展（M11.5）**：绑定顶级分类自动含其**全部子级**（与 11.12 说明一致）；只读绑定照常进入读作用域。
+
+### 11.17 一键总结草稿
+
+- **接口**：`POST /api/v1/agents/:id/sessions/:sid/kb-summary`
+- **权限**：`agent:read`（生成草稿）；入库另需 `kb:write`（走 11.6）
+- **入参**（JSON body，可为空对象）：`{"focus": "..."}`（可选，用户指定的总结重点）
+- **出参**：`200`，`data` 为总结草稿 `KBSummaryDraft`：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `title` | string | 草稿标题（1-60 字符） |
+| `content` | string | 草稿正文（Markdown，300-1500 字符；超出截断） |
+| `suggested_category_id` | string \| null | 建议分类（对绑定分类名 / 描述关键词打分取最高；无区分度为 null） |
+| `categories` | AgentKBCategoryView[] | Agent **读写绑定作用域**（M11.5：读写绑定分类 ∪ 其绑定的顶级分类的全部子级；只读绑定及其子级不含）（前端下拉数据源） |
+
+- **错误**：`400` 知识库总开关关闭 / 会话不属于该 Agent / 会话无用户消息 / LLM 输出非法或正文过短（严格校验，不产出半成品，提示重试）；`403` Agent 无**读写**绑定（M11.5：仅只读绑定不可入库，提示补绑读写分类）。
+- **模型**：平台设置 `kb_summary_model` 优先，空 = `KB_SUMMARY_MODEL` 环境变量，再空 = Agent 当前模型；LLM 调用超时 `KB_SUMMARY_TIMEOUT`（默认 120s，慢模型可调大；前端请求超时 150s 须大于此值）。
+- **入库流程**：前端确认草稿（标题 / 正文可编辑，分类下拉仅含绑定分类）→ `POST /api/v1/kb/documents`（`source=chat_summary` + `source_session_id` + `source_agent_id`），服务端再次校验会话归属与 Agent **读写绑定作用域**（含顶级 → 子级扩展）。
+
+### 11.18 注入与可观测（对话 execution_meta）
+
+知识库总开关开启且 Agent 有绑定分类时，对话应答 assistant 消息的 `execution_meta` 附带（见「4. Agent 管理」对话端点）：
+
+| 字段 | 类型 | 说明 |
+| ---- | ---- | ---- |
+| `kb_injected` | object \| null | 本轮注入条目：`{ count, ids }`；无注入时不出现 |
+| `kb_searches` | array | 每轮检索记录：`{ round, query, top_k, hit_ids, status, latency_ms }`，`status` ∈ `ok` / `empty` / `duplicate` / `degraded` / `error` |
+
+- **注入模式**（`kb_search_mode`）：`auto` = 每轮自动注入 top-K「知识库参考」段 + 注册 `search_knowledge` 工具；`tool` = 仅注册工具，模型按需检索；`off` = 不启用。
+- **注入安全**：知识段以数据声明 + 分隔符包裹（视为参考资料而非指令，沿用 M9/M10 边界），总字符预算 4000（超出截断）；工具返回同样携带声明。
+
+---
 ---
 
 ## 附录：枚举值速查
@@ -1662,6 +1891,9 @@
 | 枚举 | 取值 |
 | ---- | ---- |
 | Agent 状态 | `idle` / `running` / `stopped` / `error` |
+| KB 条目状态 | `active`（参与检索）/ `archived`（归档，不参与检索） |
+| KB 条目来源 | `manual` / `chat_summary`（对话总结入库） |
+| KB 检索模式 | `auto`（默认，自动注入 + 工具）/ `tool`（仅工具）/ `off`（不启用） |
 | 用户 / 角色状态 | `1`=启用 / `0`=停用 |
 | MCP 传输类型 | `stdio` / `sse` / `http` |
 | MCP 状态 | `pending` / `connected` / `disconnected` / `error` |

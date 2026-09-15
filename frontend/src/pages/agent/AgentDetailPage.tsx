@@ -32,6 +32,7 @@ import { VersionsPanel } from './VersionsPanel';
 import { KeysPanel } from './KeysPanel';
 import { SkillsPanel } from './SkillsPanel';
 import { MemoryPanel } from './MemoryPanel';
+import { KbPanel } from './KbPanel';
 import { MetricsPanel } from './MetricsPanel';
 import type { ColumnsType } from 'antd/es/table';
 import { Table } from 'antd';
@@ -214,6 +215,11 @@ export function AgentDetailPage() {
             key: 'skills',
             label: '关联技能',
             children: <SkillsPanel agentId={agent.id} usageMode={agent.config.skills_usage_mode} />,
+          },
+          {
+            key: 'kb',
+            label: '知识库',
+            children: <KbPanel agentId={agent.id} />,
           },
           {
             key: 'memories',

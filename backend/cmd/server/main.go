@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"agent-platform/internal/api/agent"
+
 	"agent-platform/internal/api/auth"
+	"agent-platform/internal/api/kb"
 	"agent-platform/internal/api/mcp"
 	"agent-platform/internal/api/model"
 	"agent-platform/internal/api/overview"
@@ -115,6 +117,11 @@ func main() {
 	// 向量 (M10.3): 空 = 语义检索不生效; 抽取/摘要 (M10.2): 空 = Agent 当前模型
 	embedModelSource := service.NewMutableTemplateSource(cfg.Memory.EmbedModel)
 	extractModelSource := service.NewMutableTemplateSource(cfg.Memory.ExtractModel)
+	// M11 知识库: 向量/重排/总结模型名运行时来源 + KB 总开关 (平台设置页可免重启切换)
+	kbEmbedSource := service.NewMutableTemplateSource(cfg.KB.EmbedModel)
+	kbRerankSource := service.NewMutableTemplateSource(cfg.KB.RerankModel)
+	kbSummarySource := service.NewMutableTemplateSource(cfg.KB.SummaryModel)
+	kbEnabledSource := service.NewKBEnabledSource(cfg.KB.Enabled)
 	modelService := service.NewModelTemplateService(
 		repository.NewModelTemplateRepository(),
 		repository.NewModelQuotaRepository(),
@@ -126,6 +133,7 @@ func main() {
 		cfg.Model.ChatTimeout,
 		cfg.Memory.EmbedTimeout,
 		embedModelSource,
+		kbEmbedSource,
 	)
 	// 运行时模拟流量中, Agent 调用按优先级路由到模型并消费配额 (6.5)
 	agentRuntime.SetModelRouter(modelService)
@@ -144,6 +152,51 @@ func main() {
 		repository.NewSkillAgentBindingRepository(),
 		repository.NewAuditLogRepository(),
 		service.DefaultSkillLimits(),
+	)
+
+	// 5.701 初始化知识库域 (M11 W2): 分类/条目管理 + 两阶段检索 + 异步向量化/回填 + 一键总结
+	kbCatsRepo := repository.NewKBCategoryRepository()
+	kbDocsRepo := repository.NewKBDocumentRepository()
+	kbBindingsRepo := repository.NewAgentKBBindingRepository()
+	// M11.5 事项 4: 分块 (KB_CHUNK_ENABLED=false = 整条向量路径全量回退)
+	var kbChunkRepo repository.KBChunkRepository
+	if cfg.KB.ChunkEnabled {
+		kbChunkRepo = repository.NewKBChunkRepository()
+		// 存量分块迁移 (仅 KB_CHUNK_ENABLED=true; 纯 CPU 切分不含向量, 幂等可重跑)
+		chunkOpts := service.KBChunkOptions{Size: cfg.KB.ChunkSize, Overlap: cfg.KB.ChunkOverlap, Threshold: cfg.KB.ChunkThreshold}
+		if n, err := service.MigrateExistingKBChunks(context.Background(), kbChunkRepo, chunkOpts); err != nil {
+			log.Printf("kb: 存量分块迁移失败: %v (重启后自动重试; 回填任务可补向量)", err)
+		} else if n > 0 {
+			log.Printf("kb: 存量分块迁移完成, 为 %d 个 active 条目生成块", n)
+		}
+	}
+	kbEmbedder := service.NewKBEmbedder(modelService, kbEmbedSource, cfg.KB.VectorDim, 0)
+	kbReranker := service.NewKBReranker(modelService, kbRerankSource)
+	kbRetriever := service.NewKBRetriever(kbDocsRepo, kbCatsRepo, kbBindingsRepo, kbChunkRepo, kbEmbedder, kbReranker, cfg.KB, 0)
+	kbVectorWriter := service.NewKBVectorWriter(kbDocsRepo, kbChunkRepo, kbEmbedder, 32)
+	// M11.5: 向量回填后台任务 (单飞 / 批边界取消 / 重启恢复; 批大小 = kbVectorWriter.batch)
+	kbTaskSvc := service.NewKBTaskService(repository.NewKBBackfillTaskRepository(), kbVectorWriter)
+	kbService := service.NewKBService(
+		kbCatsRepo,
+		kbDocsRepo,
+		kbBindingsRepo,
+		repository.NewChatSessionRepository(),
+		repository.NewAuditLogRepository(),
+		cfg.KB,
+		kbRetriever,
+		kbVectorWriter,
+		kbChunkRepo,
+	)
+	kbSummarizer := service.NewKBSummarizer(
+		repository.NewChatSessionRepository(),
+		repository.NewChatMessageRepository(),
+		repository.NewAgentRepository(),
+		kbBindingsRepo,
+		kbCatsRepo,
+		modelService,
+		kbSummarySource,
+		kbEnabledSource,
+		cfg.KB,
 	)
 
 	// 5.700 语义检索向量组件 (M10.3): 向量模型名按运行时来源实时判定 (平台设置页可免重启启停/切换; 空 = 纯关键词检索)
@@ -189,6 +242,9 @@ func main() {
 		repository.NewAgentExecutionRepository(),
 		cfg.Model.ChatTimeout,
 		cfg.MCP.CheckTimeout,
+		kbRetriever,
+		cfg.KB,
+		kbEnabledSource,
 	)
 	// 5.715 Agent 执行任务 watchdog: /invoke 异步任务区分 "执行中" 与 "卡死" (心跳/deadline/等待审核兜底)
 	executionWatchdog := service.NewExecutionWatchdog(chatService, repository.NewAgentExecutionRepository(), chatService.StallThreshold(), service.ExecutionWatchdogScanInterval)
@@ -212,6 +268,10 @@ func main() {
 		repository.NewMemoryRepository(),
 		repository.NewToolApprovalRepository(),
 		modelService,
+		kbBindingsRepo,
+		kbCatsRepo,
+		repository.NewAuditLogRepository(),
+		kbRetriever,
 	)
 
 	// 服务启动时, 对账上次进程遗留的活动实例
@@ -267,6 +327,10 @@ func main() {
 	if err := chatService.ReconcileOrphanExecutions(context.Background()); err != nil {
 		log.Printf("Failed to reconcile orphan executions: %v", err)
 	}
+	// M11.5: 向量回填任务对账: 上次进程残留 pending/running 任务标 failed (service restart), 可再启动
+	if _, err := kbTaskSvc.RecoverOrphans(context.Background()); err != nil {
+		log.Printf("Failed to recover kb backfill tasks: %v", err)
+	}
 	workflowScheduler.Start()
 	// 6. 初始化路由
 	approvalHandler := mcp.NewApprovalHandler(approvalService)
@@ -274,17 +338,27 @@ func main() {
 	workflowAIGenerator := service.NewWorkflowAIGenerator(modelService, repository.NewAgentRepository(), repository.NewMCPServerRepository())
 	workflowHandler := workflow.NewHandler(workflowService, workflowAIGenerator)
 	skillHandler := skill.NewHandler(skillService)
+	kbHandler := kb.NewHandler(kbService, kbTaskSvc)
 	overviewHandler := overview.NewHandler(service.NewOverviewService(repository.NewOverviewRepository()))
-	// 5.8 初始化平台设置域: 平台名/图标 + 记忆向量/抽取模型 (运行时可改, 免重启)
+	// 5.8 初始化平台设置域: 平台名/图标 + 记忆向量/抽取模型 + 知识库三模型/总开关 (运行时可改, 免重启)
 	platformService := service.NewPlatformService(
 		repository.NewPlatformSettingsRepository(),
 		repository.NewAuditLogRepository(),
 		service.PlatformModelSources{
-			Embed:       embedModelSource,
-			EmbedSink:   embedModelSource,
-			Extract:     extractModelSource,
-			ExtractSink: extractModelSource,
+			Embed:         embedModelSource,
+			EmbedSink:     embedModelSource,
+			Extract:       extractModelSource,
+			ExtractSink:   extractModelSource,
+			KBEmbed:       kbEmbedSource,
+			KBEmbedSink:   kbEmbedSource,
+			KBRerank:      kbRerankSource,
+			KBRerankSink:  kbRerankSource,
+			KBSummary:     kbSummarySource,
+			KBSummarySink: kbSummarySource,
+			KBEnabled:     kbEnabledSource,
 		},
+		modelService,
+		cfg.KB.VectorDim,
 	)
 	// 启动时把库中已保存的向量/抽取模型名同步进运行时来源 (重启后无需等待首次设置请求即生效)
 	if err := platformService.SyncModelSettings(context.Background()); err != nil {
@@ -298,7 +372,7 @@ func main() {
 		repository.NewAuditLogRepository(),
 	)
 	rbacHandler := rbac.NewHandler(rbacService)
-	router := setupRouter(cfg, agent.NewHandler(agentService, chatService, memService), mcp.NewHandler(mcpService, approvalService), model.NewHandler(modelService), approvalHandler, workflowHandler, skillHandler, rbacHandler, overviewHandler, platformHandler)
+	router := setupRouter(cfg, agent.NewHandler(agentService, chatService, memService, kbSummarizer), mcp.NewHandler(mcpService, approvalService), model.NewHandler(modelService), approvalHandler, workflowHandler, skillHandler, kbHandler, rbacHandler, overviewHandler, platformHandler)
 
 	// 7. 启动服务 (支持优雅退出)
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -333,7 +407,7 @@ func main() {
 	logger.Close()
 }
 
-func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mcp.Handler, modelHandler *model.Handler, approvalHandler *mcp.ApprovalHandler, workflowHandler *workflow.Handler, skillHandler *skill.Handler, rbacHandler *rbac.Handler, overviewHandler *overview.Handler, platformHandler *platform.Handler) *gin.Engine {
+func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mcp.Handler, modelHandler *model.Handler, approvalHandler *mcp.ApprovalHandler, workflowHandler *workflow.Handler, skillHandler *skill.Handler, kbHandler *kb.Handler, rbacHandler *rbac.Handler, overviewHandler *overview.Handler, platformHandler *platform.Handler) *gin.Engine {
 	// 设置模式
 	gin.SetMode(cfg.Server.Mode)
 
@@ -358,6 +432,7 @@ func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mc
 	approvalHandler.RegisterRoutes(api)
 	workflowHandler.RegisterRoutes(api)
 	skillHandler.RegisterRoutes(api)
+	kbHandler.RegisterRoutes(api)
 	rbacHandler.RegisterRoutes(api)
 	overviewHandler.RegisterRoutes(api)
 	platformHandler.RegisterRoutes(api)

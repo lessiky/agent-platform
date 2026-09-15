@@ -11,19 +11,21 @@ import (
 	"agent-platform/internal/middleware"
 	"agent-platform/internal/repository"
 	"agent-platform/internal/service"
+	apperrors "agent-platform/pkg/errors"
 	"agent-platform/pkg/response"
 
 	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
-	svc  service.AgentService
-	chat service.ChatService
-	mem  service.MemoryService // 长期记忆 (M10.1)
+	svc          service.AgentService
+	chat         service.ChatService
+	mem          service.MemoryService // 长期记忆 (M10.1)
+	kbSummarizer *service.KBSummarizer // 知识库一键总结 (M11), 可为 nil
 }
 
-func NewHandler(svc service.AgentService, chat service.ChatService, mem service.MemoryService) *Handler {
-	return &Handler{svc: svc, chat: chat, mem: mem}
+func NewHandler(svc service.AgentService, chat service.ChatService, mem service.MemoryService, kbSummarizer *service.KBSummarizer) *Handler {
+	return &Handler{svc: svc, chat: chat, mem: mem, kbSummarizer: kbSummarizer}
 }
 
 // RegisterRoutes 注册 Agent 路由
@@ -72,6 +74,11 @@ func (h *Handler) RegisterRoutes(router *gin.RouterGroup) {
 		agents.GET("/:id/memories/:mid", middleware.AuthCheck("agent:read"), h.GetMemory)
 		agents.PATCH("/:id/memories/:mid", middleware.AuthCheck("agent:write"), h.UpdateMemory)
 		agents.DELETE("/:id/memories/:mid", middleware.AuthCheck("agent:write"), h.DeleteMemory)
+
+		// 知识库 (M11): 绑定视图 + 作用域检索试算 + 一键总结草稿
+		agents.GET("/:id/kb", middleware.AuthCheck("agent:read"), h.ListAgentKB)
+		agents.GET("/:id/kb/search", middleware.AuthCheck("agent:read"), h.TrialSearchAgentKB)
+		agents.POST("/:id/sessions/:sid/kb-summary", middleware.AuthCheck("agent:read"), h.SummarizeToKB)
 	}
 
 	// 外部调用入口 (M2 待办: API Key 调用链): 使用 Agent API Key 认证, 不走用户 JWT
@@ -680,4 +687,51 @@ func (h *Handler) DeleteMemory(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"deleted": true})
+}
+
+// ListAgentKB Agent 知识库绑定视图 (M11, 供详情页签: 绑定分类 + 条目数 + 检索模式)
+func (h *Handler) ListAgentKB(c *gin.Context) {
+	view, err := h.svc.ListAgentKB(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, view)
+}
+
+// TrialSearchAgentKB Agent 作用域检索试算 (M11: query / top_k, 服务端按当前绑定过滤)
+func (h *Handler) TrialSearchAgentKB(c *gin.Context) {
+	topK, _ := strconv.Atoi(c.DefaultQuery("top_k", "5"))
+	hits, err := h.svc.TrialSearchForAgent(c.Request.Context(), c.Param("id"), c.Query("query"), topK)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, gin.H{"hits": hits})
+}
+
+// SummarizeToKB 一键总结草稿 (M11: LLM 结构化输出 + 校验 + 建议分类; 确认后走 POST /kb/documents 入库)
+func (h *Handler) SummarizeToKB(c *gin.Context) {
+	if h.kbSummarizer == nil {
+		response.Error(c, errKBNotEnabled())
+		return
+	}
+	var req struct {
+		Focus string `json:"focus"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "invalid request body: "+err.Error())
+		return
+	}
+	draft, err := h.kbSummarizer.SummarizeSession(c.Request.Context(), c.Param("id"), c.Param("sid"), req.Focus)
+	if err != nil {
+		response.Error(c, err)
+		return
+	}
+	response.Success(c, draft)
+}
+
+// errKBNotEnabled 知识库组件未装配时的统一错误
+func errKBNotEnabled() error {
+	return apperrors.NewValidationError("知识库功能未启用")
 }

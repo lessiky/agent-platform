@@ -32,6 +32,12 @@ type AgentConfig struct {
 	MaxToolRounds   int      `json:"max_tool_rounds,omitempty"`   // 单次对话工具调用轮数上限 (0=默认 5)
 	SkillsUsageMode string   `json:"skills_usage_mode,omitempty"` // 技能注入模式 (metadata_injection/full_injection, M9)
 	SimulateTraffic bool     `json:"simulate_traffic,omitempty"`  // 实例常驻时是否生成模拟流量 (默认 false, M2.5)
+	// KnowledgeCategories 绑定的知识库分类 ID (M11, 与 agent_kb_bindings 表同步)
+	KnowledgeCategories []string `json:"knowledge_categories,omitempty"`
+	// KnowledgeCategoriesReadonly 只读绑定的知识库分类 ID (M11.5, 可检索不可写入; 与 KnowledgeCategories 互斥)
+	KnowledgeCategoriesReadonly []string `json:"knowledge_categories_readonly,omitempty"`
+	// KbSearchMode 知识库检索模式 (M11): auto/tool/off, 空 = auto
+	KbSearchMode string `json:"kb_search_mode,omitempty"`
 }
 
 // CreateAgentRequest 创建 Agent 请求
@@ -50,6 +56,9 @@ type CreateAgentRequest struct {
 	TeamID          string   `json:"team_id"`
 	SimulateTraffic bool     `json:"simulate_traffic"`
 	SkillsUsageMode string   `json:"skills_usage_mode"` // 技能注入模式 (M9)
+	KnowledgeCategories         []string `json:"knowledge_categories"`         // 绑定的知识库分类 (M11, nil/空 = 不绑定)
+	KnowledgeCategoriesReadonly []string `json:"knowledge_categories_readonly"` // 只读绑定分类 (M11.5, 与上互斥; nil/空 = 不绑定)
+	KbSearchMode                string   `json:"kb_search_mode"`                // 知识库检索模式 (M11: auto/tool/off, 空 = auto)
 }
 
 // UpdateAgentRequest 更新 Agent 请求 (全量更新; mcp_ids 为 nil 表示绑定不变)
@@ -68,6 +77,9 @@ type UpdateAgentRequest struct {
 	TeamID          string   `json:"team_id"`
 	SimulateTraffic bool     `json:"simulate_traffic"`
 	SkillsUsageMode string   `json:"skills_usage_mode"` // 技能注入模式 (M9)
+	KnowledgeCategories         []string `json:"knowledge_categories"`          // nil 表示绑定不变; 空数组 = 清空 (M11)
+	KnowledgeCategoriesReadonly []string `json:"knowledge_categories_readonly"` // 只读绑定 (M11.5); nil 表示不变; 空数组 = 清空
+	KbSearchMode                string   `json:"kb_search_mode"`                // 知识库检索模式 (M11, 空 = 不变; auto/tool/off)
 }
 
 // AgentService Agent 业务服务
@@ -100,6 +112,10 @@ type AgentService interface {
 	ListBoundSkills(ctx context.Context, agentID string) ([]BoundSkillView, error)
 	// UpdateAgentSkills 全量更新 Agent 技能绑定 (M9, 含依赖与预算校验)
 	UpdateAgentSkills(ctx context.Context, agentID string, skillIDs []string, operatorID string) error
+	// ListAgentKB Agent 知识库绑定视图 (M11, 供详情页签: 绑定分类 + 条目数 + 检索模式)
+	ListAgentKB(ctx context.Context, agentID string) (*AgentKBView, error)
+	// TrialSearchForAgent Agent 作用域检索试算 (M11, 服务端按当前绑定重新鉴权)
+	TrialSearchForAgent(ctx context.Context, agentID, query string, topK int) ([]KBSearchHit, error)
 	GetMetrics(ctx context.Context, agentID string, from, to time.Time) (map[string]interface{}, error)
 	GetLogs(ctx context.Context, filter repository.AgentLogFilter) ([]*model.AgentLog, int64, error)
 	Dashboard(ctx context.Context) (map[string]interface{}, error)
@@ -143,6 +159,10 @@ type agentService struct {
 	memories      repository.MemoryRepository       // 长期记忆 (M10.1): 删除 Agent 级联清理
 	toolApprovals repository.ToolApprovalRepository // /invoke 202 待审核结果的 Key 鉴权查询
 	modelSvc      ModelTemplateService              // /invoke 降级决策 (无可用模型时走旧链)
+	kbBindings  repository.AgentKBBindingRepository // 知识库分类绑定 (M11)
+	kbCats      repository.KBCategoryRepository     // 知识库分类 (M11, 绑定校验/视图)
+	audits      repository.AuditLogRepository       // 审计 (M11 绑定变更留痕)
+	kbRetriever *KBRetriever                        // 检索试算 (M11), 可为 nil
 }
 
 func NewAgentService(
@@ -162,6 +182,10 @@ func NewAgentService(
 	memories repository.MemoryRepository,
 	toolApprovals repository.ToolApprovalRepository,
 	modelSvc ModelTemplateService,
+	kbBindings repository.AgentKBBindingRepository,
+	kbCats repository.KBCategoryRepository,
+	audits repository.AuditLogRepository,
+	kbRetriever *KBRetriever,
 ) AgentService {
 	return &agentService{
 		agents:        agents,
@@ -180,6 +204,10 @@ func NewAgentService(
 		memories:      memories,
 		toolApprovals: toolApprovals,
 		modelSvc:      modelSvc,
+		kbBindings:    kbBindings,
+		kbCats:        kbCats,
+		audits:        audits,
+		kbRetriever:   kbRetriever,
 	}
 }
 
@@ -194,16 +222,22 @@ func (s *agentService) CreateAgent(ctx context.Context, req CreateAgentRequest, 
 	if err := s.validateSkills(ctx, req.MCPIDs, req.Tools, req.Skills, req.SkillsUsageMode); err != nil {
 		return nil, err
 	}
+	if err := s.validateKBCategoryPair(ctx, req.KnowledgeCategories, req.KnowledgeCategoriesReadonly); err != nil {
+		return nil, err
+	}
 
 	configJSON, err := json.Marshal(AgentConfig{
-		Model:           req.Model,
-		SystemPrompt:    req.SystemPrompt,
-		Temperature:     req.Temperature,
-		MaxTokens:       req.MaxTokens,
-		Tools:           req.Tools,
-		MaxToolRounds:   req.MaxToolRounds,
-		SkillsUsageMode: req.SkillsUsageMode,
-		SimulateTraffic: req.SimulateTraffic,
+		Model:                       req.Model,
+		SystemPrompt:                req.SystemPrompt,
+		Temperature:                 req.Temperature,
+		MaxTokens:                   req.MaxTokens,
+		Tools:                       req.Tools,
+		MaxToolRounds:               req.MaxToolRounds,
+		SkillsUsageMode:             req.SkillsUsageMode,
+		SimulateTraffic:             req.SimulateTraffic,
+		KnowledgeCategories:         req.KnowledgeCategories,
+		KnowledgeCategoriesReadonly: req.KnowledgeCategoriesReadonly,
+		KbSearchMode:                normalizeKbSearchMode(req.KbSearchMode),
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to marshal agent config")
@@ -233,6 +267,11 @@ func (s *agentService) CreateAgent(ctx context.Context, req CreateAgentRequest, 
 	}
 	if len(req.Skills) > 0 {
 		if err := s.syncSkillBindings(ctx, agent.ID, req.Skills, operatorID); err != nil {
+			return nil, err
+		}
+	}
+	if req.KnowledgeCategories != nil || req.KnowledgeCategoriesReadonly != nil {
+		if err := s.syncKBBindings(ctx, agent.ID, req.KnowledgeCategories, req.KnowledgeCategoriesReadonly, operatorID); err != nil {
 			return nil, err
 		}
 	}
@@ -407,16 +446,37 @@ func (s *agentService) UpdateAgent(ctx context.Context, id string, req UpdateAge
 			return nil, err
 		}
 	}
+	// 知识库 (M11/M11.5): 全量更新语义下 nil 字段保持旧值 (读取旧配置兜底)
+	var oldCfg AgentConfig
+	_ = json.Unmarshal(agent.Config, &oldCfg)
+	finalKBIDs := oldCfg.KnowledgeCategories
+	if req.KnowledgeCategories != nil {
+		finalKBIDs = req.KnowledgeCategories
+	}
+	finalKBROIDs := oldCfg.KnowledgeCategoriesReadonly
+	if req.KnowledgeCategoriesReadonly != nil {
+		finalKBROIDs = req.KnowledgeCategoriesReadonly
+	}
+	if err := s.validateKBCategoryPair(ctx, finalKBIDs, finalKBROIDs); err != nil {
+		return nil, err
+	}
+	kbSearchMode := oldCfg.KbSearchMode
+	if req.KbSearchMode != "" {
+		kbSearchMode = normalizeKbSearchMode(req.KbSearchMode)
+	}
 
 	configJSON, err := json.Marshal(AgentConfig{
-		Model:           req.Model,
-		SystemPrompt:    req.SystemPrompt,
-		Temperature:     req.Temperature,
-		MaxTokens:       req.MaxTokens,
-		Tools:           req.Tools,
-		MaxToolRounds:   req.MaxToolRounds,
-		SkillsUsageMode: req.SkillsUsageMode,
-		SimulateTraffic: req.SimulateTraffic,
+		Model:                 req.Model,
+		SystemPrompt:          req.SystemPrompt,
+		Temperature:           req.Temperature,
+		MaxTokens:             req.MaxTokens,
+		Tools:                 req.Tools,
+		MaxToolRounds:         req.MaxToolRounds,
+		SkillsUsageMode:       req.SkillsUsageMode,
+		SimulateTraffic:       req.SimulateTraffic,
+		KnowledgeCategories:         finalKBIDs,
+		KnowledgeCategoriesReadonly: finalKBROIDs,
+		KbSearchMode:                kbSearchMode,
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to marshal agent config")
@@ -439,6 +499,11 @@ func (s *agentService) UpdateAgent(ctx context.Context, id string, req UpdateAge
 	}
 	if req.Skills != nil {
 		if err := s.syncSkillBindings(ctx, agent.ID, req.Skills, operatorID); err != nil {
+			return nil, err
+		}
+	}
+	if req.KnowledgeCategories != nil || req.KnowledgeCategoriesReadonly != nil {
+		if err := s.syncKBBindings(ctx, agent.ID, finalKBIDs, finalKBROIDs, operatorID); err != nil {
 			return nil, err
 		}
 	}
@@ -469,6 +534,9 @@ func (s *agentService) DeleteAgent(ctx context.Context, id string) error {
 	}
 	if err := s.skillBindings.DeleteByAgent(ctx, id); err != nil {
 		return errors.Wrap(err, "failed to unbind skills")
+	}
+	if err := s.kbBindings.DeleteByAgent(ctx, id); err != nil {
+		return errors.Wrap(err, "failed to unbind kb categories")
 	}
 	if err := s.chatSessions.DeleteByAgentCascade(ctx, id); err != nil {
 		return errors.Wrap(err, "failed to delete chat sessions")

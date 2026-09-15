@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"agent-platform/internal/config"
 	"agent-platform/internal/mcpclient"
 	"agent-platform/internal/model"
 	"agent-platform/internal/modelclient"
@@ -129,6 +130,10 @@ type chatService struct {
 	skills   SkillService
 	memSvc   MemoryService // 长期记忆注入 (M10.1), 可为 nil (不注入)
 	memExtract *MemoryExtractor // turn 结束异步管线: 自动抽取 + 滚动摘要 (M10.2), 可为 nil
+	// 知识库 (M11): 注入 + search_knowledge 工具; 均为 nil 时行为与 M11 之前一致
+	kbRetriever *KBRetriever
+	kbCfg       config.KBConfig
+	kbEnabled   *KBEnabledSource
 
 	executions     repository.AgentExecutionRepository // 执行任务 (/invoke 202 异步化)
 	modelChatTime  time.Duration                       // 模型单次调用超时 (执行预算计算)
@@ -153,6 +158,9 @@ func NewChatService(
 	memExtract *MemoryExtractor,
 	executions repository.AgentExecutionRepository,
 	modelChatTimeout, mcpCallTimeout time.Duration,
+	kbRetriever *KBRetriever,
+	kbCfg config.KBConfig,
+	kbEnabled *KBEnabledSource,
 ) ChatService {
 	if modelChatTimeout <= 0 {
 		modelChatTimeout = 120 * time.Second
@@ -182,6 +190,9 @@ func NewChatService(
 		mcpCallTime:    mcpCallTimeout,
 		stallThreshold: stall,
 		execCancels:    make(map[string]context.CancelFunc),
+		kbRetriever:    kbRetriever,
+		kbCfg:          kbCfg,
+		kbEnabled:      kbEnabled,
 	}
 }
 
@@ -921,10 +932,18 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 		memorySection, memInjected = s.memSvc.BuildMemorySection(ctx, agentID, session, message)
 	}
 
-	// 上下文: 系统提示词 + 技能段 + 历史 (仅 user/assistant, 跳过失败的空应答; stateless 无历史) + 本轮消息
+	// 知识库注入 (M11): auto 模式检索 top-K 组装"知识库参考"段; auto/tool 模式注册 search_knowledge 工具;
+	// 无绑定/开关关闭/模式 off 时 kt 为 nil (A2/A10), 失败/超时仅告警不阻断 (A8)
+	kt := s.prepareKBTurn(ctx, agentID, agentCfg, source, executionID, session, message)
+	kbSection := ""
+	if kt != nil {
+		kbSection = kt.section
+	}
+
+	// 上下文: 系统提示词 + 技能段 + 知识库段 + 记忆段 + 历史 (仅 user/assistant, 跳过失败的空应答; stateless 无历史) + 本轮消息
 	messages := make([]modelclient.ChatMessage, 0, 2)
-	if sysPrompt := strings.TrimSpace(agentCfg.SystemPrompt); sysPrompt != "" || skillSection != "" || memorySection != "" {
-		messages = append(messages, modelclient.ChatMessage{Role: "system", Content: sysPrompt + skillSection + memorySection})
+	if sysPrompt := strings.TrimSpace(agentCfg.SystemPrompt); sysPrompt != "" || skillSection != "" || kbSection != "" || memorySection != "" {
+		messages = append(messages, modelclient.ChatMessage{Role: "system", Content: sysPrompt + skillSection + kbSection + memorySection})
 	}
 	if session != nil {
 		// 会话滚动摘要 (M10.2, 设计文档 §7): Summary 非空时作为历史第一条注入
@@ -960,6 +979,9 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	if st.loadTool() {
 		tools = append(tools, loadSkillToolDef())
 	}
+	if kt.registerTool() {
+		tools = append(tools, searchKnowledgeToolDef())
+	}
 
 	gen := modelclient.GenOptions{}
 	if agentCfg.Temperature > 0 {
@@ -980,7 +1002,7 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	if err != nil {
 		s.execLog(agentID, model.LogLevelError, fmt.Sprintf("%s model failed execution_id=%s error=%s", source, executionID, err))
 		if session != nil {
-			s.persistChatTurn(ctx, session, executionID, message, "", nil, nil, memInjected, nil, start, "", 0, thinking.String(), err)
+			s.persistChatTurn(ctx, session, executionID, message, "", nil, nil, memInjected, nil, start, "", 0, thinking.String(), kt, err)
 		}
 		s.recordStat(agentID, start, 0, true)
 		s.execLog(agentID, model.LogLevelError, fmt.Sprintf("%s execution failed execution_id=%s error=%s", source, executionID, err))
@@ -1001,11 +1023,11 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	if agentCfg.MaxToolRounds > 0 {
 		maxRounds = agentCfg.MaxToolRounds
 	}
-	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, sessionID, source, approvalSource, &pending, &mcpCalls, executionID, st, tracker, showThinking, onThinking)
+	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, sessionID, source, approvalSource, &pending, &mcpCalls, executionID, st, kt, tracker, showThinking, onThinking)
 	if roundErr != nil {
 		if strings.TrimSpace(outcome.Content) == "" {
 			if session != nil {
-				s.persistChatTurn(ctx, session, executionID, message, "", mcpCalls, nil, memInjected, pending, start, outcome.TemplateName, totalTokens, thinking.String(), roundErr)
+				s.persistChatTurn(ctx, session, executionID, message, "", mcpCalls, nil, memInjected, pending, start, outcome.TemplateName, totalTokens, thinking.String(), kt, roundErr)
 			}
 			s.recordStat(agentID, start, totalTokens, true)
 			s.execLog(agentID, model.LogLevelError, fmt.Sprintf("%s execution failed execution_id=%s error=%s", source, executionID, roundErr))
@@ -1037,7 +1059,7 @@ func (s *chatService) runTurn(ctx context.Context, agent *model.Agent, agentCfg 
 	if session != nil {
 		// 落库: user + tool + assistant (stateless 不写会话消息)
 		var pErr error
-		assistantID, pErr = s.persistChatTurn(ctx, session, executionID, message, finalReply, mcpCalls, skillCalls, memInjected, pending, start, outcome.TemplateName, totalTokens, thinking.String(), nil)
+		assistantID, pErr = s.persistChatTurn(ctx, session, executionID, message, finalReply, mcpCalls, skillCalls, memInjected, pending, start, outcome.TemplateName, totalTokens, thinking.String(), kt, nil)
 		if pErr != nil {
 			s.recordStat(agentID, start, totalTokens, false)
 			return nil, pErr
@@ -1287,6 +1309,7 @@ func (s *chatService) runToolRounds(
 	mcpCalls *[]MCPChatCall,
 	executionID string,
 	st *skillTurn,
+	kt *kbTurn,
 	tracker *executionTracker,
 	showThinking bool,
 	onThinking func(round int, delta string),
@@ -1307,6 +1330,8 @@ func (s *chatService) runToolRounds(
 				toolStartAt := time.Now()
 				if tc.Function.Name == loadSkillToolName && st.loadTool() {
 					toolMsg = s.executeSkillLoad(agentID, source, executionID, toolIndex, tc, st)
+				} else if tc.Function.Name == searchKnowledgeToolName && kt.registerTool() {
+					toolMsg = s.executeKnowledgeSearch(ctx, agentID, source, executionID, round, tc, kt)
 				} else {
 					toolMsg, approvalPending = s.executeToolCall(ctx, agentID, sessionID, source, approvalSource, toolIndex, tc, pending, mcpCalls, executionID)
 				}
@@ -1411,9 +1436,15 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	if s.memSvc != nil {
 		memorySection, memInjected = s.memSvc.BuildMemorySection(ctx, agentID, session, "")
 	}
+	// 知识库注入 (M11): 续答轮同样携带知识库上下文 (空查询: 向量召回跳过, 按时间衰减 + 使用频率取近期条目)
+	kt := s.prepareKBTurn(ctx, agentID, &agentCfg, sourceLabel, "appr-"+approval.ID, session, "")
+	kbSection := ""
+	if kt != nil {
+		kbSection = kt.section
+	}
 	messages := make([]modelclient.ChatMessage, 0, len(history)+2)
-	if sysPrompt := strings.TrimSpace(agentCfg.SystemPrompt); sysPrompt != "" || skillSection != "" || memorySection != "" {
-		messages = append(messages, modelclient.ChatMessage{Role: "system", Content: sysPrompt + skillSection + memorySection})
+	if sysPrompt := strings.TrimSpace(agentCfg.SystemPrompt); sysPrompt != "" || skillSection != "" || kbSection != "" || memorySection != "" {
+		messages = append(messages, modelclient.ChatMessage{Role: "system", Content: sysPrompt + skillSection + kbSection + memorySection})
 	}
 	// 会话滚动摘要 (M10.2, 设计文档 §7): 续答轮同样携带摘要上下文
 	messages = withSessionSummary(session.Summary, messages)
@@ -1454,6 +1485,9 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	}
 	if st.loadTool() {
 		tools = append(tools, loadSkillToolDef())
+	}
+	if kt.registerTool() {
+		tools = append(tools, searchKnowledgeToolDef())
 	}
 
 	gen := modelclient.GenOptions{}
@@ -1499,7 +1533,7 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	if agentCfg.MaxToolRounds > 0 {
 		maxRounds = agentCfg.MaxToolRounds
 	}
-	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, session.ID, sourceLabel, approval.Source, &pending, &mcpCalls, executionID, st, nil, false, nil)
+	extraTokens, roundErr := s.runToolRounds(ctx, agentID, &messages, outcome, tools, toolIndex, gen, maxRounds, session.ID, sourceLabel, approval.Source, &pending, &mcpCalls, executionID, st, kt, nil, false, nil)
 	if roundErr != nil {
 		log.Printf("chat: continuation tool rounds failed approval=%s: %v", approval.ID, roundErr)
 	}
@@ -1526,6 +1560,14 @@ func (s *chatService) ContinueAfterApproval(ctx context.Context, approval *model
 	}
 	if st != nil && len(st.calls) > 0 {
 		meta["skill_calls"] = st.calls
+	}
+	if kt != nil {
+		if len(kt.injected) > 0 {
+			meta["kb_injected"] = map[string]interface{}{"count": len(kt.injected), "ids": kt.injected}
+		}
+		if len(kt.searches) > 0 {
+			meta["kb_searches"] = kt.searches
+		}
 	}
 	metaJSON, _ := json.Marshal(meta)
 	assistant := &model.ChatMessage{
@@ -1659,8 +1701,9 @@ func (s *chatService) GetApprovalContinuation(ctx context.Context, approvalID st
 }
 
 // persistChatTurn 落库一轮对话 (user + tool + assistant), 返回 assistant 消息 ID;
-// memInjected 为本轮注入的记忆 ID 列表 (M10.1, 写入 execution_meta.memory_injected)
-func (s *chatService) persistChatTurn(ctx context.Context, session *model.ChatSession, executionID, userMsg, reply string, calls []MCPChatCall, skillCalls []SkillCall, memInjected []string, pending []runtime.PendingApproval, start time.Time, modelName string, totalTokens int, thinking string, errMsg error) (string, error) {
+// memInjected 为本轮注入的记忆 ID 列表 (M10.1, 写入 execution_meta.memory_injected);
+// kt 为单轮知识库状态 (M11, 写入 execution_meta.kb_injected / kb_searches), 可为 nil
+func (s *chatService) persistChatTurn(ctx context.Context, session *model.ChatSession, executionID, userMsg, reply string, calls []MCPChatCall, skillCalls []SkillCall, memInjected []string, pending []runtime.PendingApproval, start time.Time, modelName string, totalTokens int, thinking string, kt *kbTurn, errMsg error) (string, error) {
 	meta := map[string]interface{}{
 		"execution_id": executionID,
 		"latency_ms":   time.Since(start).Milliseconds(),
@@ -1683,6 +1726,14 @@ func (s *chatService) persistChatTurn(ctx context.Context, session *model.ChatSe
 	}
 	if len(pending) > 0 {
 		meta["pending_approvals"] = pending
+	}
+	if kt != nil {
+		if len(kt.injected) > 0 {
+			meta["kb_injected"] = map[string]interface{}{"count": len(kt.injected), "ids": kt.injected}
+		}
+		if len(kt.searches) > 0 {
+			meta["kb_searches"] = kt.searches
+		}
 	}
 	if errMsg != nil {
 		meta["error"] = errMsg.Error()

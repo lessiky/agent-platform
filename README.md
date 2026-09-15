@@ -1,4 +1,4 @@
-# Agent 管理平台
+﻿# Agent 管理平台
 
 AI Agent 统一管理平台：支持 Agent 创建与运行管理、模型路由与配额、MCP 工具注册与人工审核、技能包能力扩展、DAG 工作流编排。
 
@@ -9,16 +9,18 @@ AI Agent 统一管理平台：支持 Agent 创建与运行管理、模型路由�
 | 概览       | 全平台资源与执行状态                          | 概览            | 任意已登录用户                                                 |
 | Agent 管理 | Agent CRUD、实例启停、版本回滚、API Key、统计与日志  | Agent 管理      | `agent:read` / `agent:write`                            |
 | Agent 对话 | 多轮对话、对话内工具调用（联动人工审核）、执行元数据          | Agent 详情 → 对话 | `agent:write`                                           |
+| 记忆       | 三层记忆（会话摘要 / 长期记忆 / 语义检索）、转数后自动抽取      | Agent 详情 → 记忆 | `agent:read` / `agent:write`                            |
 | 技能管理     | 技能包导入 / 预览 / 删除、Agent 关联、运行时注入      | 技能管理          | `skill:read` / `skill:write`                            |
 | MCP 管理   | MCP 注册、工具发现、健康监控、工具审核开关、Agent 绑定    | MCP 管理        | `mcp:read` / `mcp:write`                                |
 | 模型管理     | 模型模板 CRUD、连通性检测、配额、优先级路由            | 模型管理          | `model:read` / `model:write`                            |
 | 审核中心     | MCP 工具调用人工审核（通过 / 驳回 / 超时策略）        | 审核中心          | 查看 `mcp:read`，通过 / 驳回 `mcp:approve`                     |
 | 工作流      | DAG 编排、执行引擎、Cron 定时、Webhook 触发、执行追踪 | 工作流管理         | `workflow:read` / `workflow:write` / `workflow:execute` |
+| 知识库       | 两级分类树、条目管理 / 归档搜索、Agent 分类绑定（含只读降权）、对话检索注入、一键总结入库、向量回填任务、条目分块 | 知识库            | `kb:read` / `kb:write`                                  |
 | 系统管理     | 用户 / 角色 / 权限管理, 平台设置 (平台名 / 图标)     | 系统管理          | `user:manage` / `role:manage` / `platform:manage`       |
 
 ## 模块状态
 
-- M1 基础框架: 认证 (JWT)、RBAC 权限 (真实查询 user_roles/role_permissions, 15 权限点 / admin·operator·user 角色 + 用户/角色管理 API 与 UI, 详见 docs/phase1/RBAC-implementation-summary.md)、统一响应/错误
+- M1 基础框架: 认证 (JWT)、RBAC 权限 (真实查询 user_roles/role_permissions, 17 权限点 / admin·operator·user 角色 + 用户/角色管理 API 与 UI, 详见 docs/phase1/RBAC-implementation-summary.md)、统一响应/错误
 - M2 Agent 管理: Agent CRUD (模型下拉选择, MCP 绑定 + 可用工具自动校验)、实例启停、版本回滚、API Key (外部调用入口 /invoke)、运行日志、调用统计、状态看板 + 前端页面 (详见 docs/phase1/M2-implementation-summary.md)
 - M2.5 Agent 对话与系统提示词: 多轮对话 (会话持久化, 最近 10 条上下文)、模型调用 (OpenAI 兼容, M4 路由故障转移 + 配额)、对话内工具调用 (白名单 + M4.5 审核门禁, 轮数可配)、执行元数据 (execution_id / tokens / 耗时) + 前端对话面板 (详见 docs/phase1/M2.5-implementation-summary.md)
 - M3 MCP 管理: MCP 注册、工具发现、凭证加密 (AES-256-GCM)、健康监控、Agent 绑定调用 + 前端页面 (详见 docs/phase1/M3-implementation-summary.md)
@@ -26,6 +28,9 @@ AI Agent 统一管理平台：支持 Agent 创建与运行管理、模型路由�
 - M4.5 MCP 工具人工审核: 工具级审核开关、审核请求生命周期 (通过/驳回/超时)、审核中心 + 审计日志 + 前端页面 (详见 docs/phase1/M4.5-implementation-summary.md)
 - M5 工作流: DAG 编排 (agent/mcp_tool/http/delay/condition 五类节点 + 条件分支)、执行引擎 (变量传递/节点级重试/超时/取消)、Cron 定时调度、Webhook 触发、MCP 节点人工审核挂起/恢复 (联动 M4.5)、执行追踪看板 + 前端可视化编辑器 (详见 docs/phase1/M5-implementation-summary.md)
 - M9 技能管理: 技能包导入 (zip 校验 / 防 zip-slip / 同名升级)、文件预览下载、删除拦截、Agent 关联 (required_tools 依赖校验) + 运行时注入 (渐进式披露 / 全量注入双模式, load_skill 内置工具)、使用追溯 + 前端页面 (详见 docs/phase1/M9-development-plan.md)
+- M10 记忆: 三层记忆 (L1 会话滚动摘要 / L2 结构化长期记忆 / L3 语义检索增强可选) + 转数后自动抽取 (LLM 异步抽取 → 去重 upsert, best-effort 不阻塞对话) + 长期记忆检索注入系统提示词 (关键词 bigram + 时间衰减 + 使用频率打分, 失败隔离) + Agent 详情页「记忆」页签 (列表 / 筛选 / CRUD / 启用停用 / 来源展示, 复用 agent:read / agent:write) + E2E 45/45 (无 embedding) 与 29/29 (有 embedding) 全绿 (详见 docs/phase2/M10-memory-design.md)
+- M11 知识库: 分类 CRUD (删除保护 + 审计) + 条目 CRUD / 归档 / 搜索、Agent 分类绑定 (读 + 写) + 检索模式 (auto/tool/off)、pgvector 两阶段检索 (HNSW 向量召回 + rerank 重排, 四级降级)、每轮「知识库参考」注入 + search_knowledge 内置工具 (execution_meta 追溯)、一键总结入库 (LLM 结构化草稿 + 人工确认)、平台设置 (向量化 / rerank / 总结模型 + 向量回填) + 前端页面 (详见 docs/phase2/M11-implementation-summary.md)
+- M11.5 知识库 P1/P2: 两级分类树 (绑定顶级自动含子级, 同级唯一放宽 + 路径展示) + 分类级只读绑定 (只读可检索禁写入, ChatPanel 禁用提示) + 向量回填后台任务化 (单飞 / 进度 / 批边界取消 / 重启恢复, 旧端点 410) + 条目分块 / 块级向量 (Markdown 结构分块 + 同事务重建 + 块级 HNSW 召回 + 最佳命中块摘录, KB_CHUNK_ENABLED 回退开关) + 前端 (树侧栏 / 父级选择器 / TreeSelect + 只读开关 / 任务面板 / 分块页签) + E2E 4 脚本全绿 (含 A30b 回退演练独立脚本) (详见 docs/phase2/M11.5A-implementation-summary.md, docs/phase2/M11.5B-implementation-summary.md)
 
 ## 前提条件
 
@@ -142,9 +147,9 @@ docker compose -f infra/docker-compose.yml up -d --build backend  # 单独重建
 
 | 角色         | 说明   | 权限                                                                                |
 | ---------- | ---- | --------------------------------------------------------------------------------- |
-| `admin`    | 管理员  | 全部 15 个权限点（含 `mcp:approve` / `user:manage` / `role:manage` / `platform:manage`）   |
-| `operator` | 运营   | 业务读写（除 `mcp:approve` / `user:manage` / `role:manage` / `platform:manage` 外的 11 个） |
-| `user`     | 默认角色 | 只读（`agent:read` / `mcp:read` / `model:read` / `workflow:read` / `skill:read`）     |
+| `admin`    | 管理员  | 全部 17 个权限点（含 `mcp:approve` / `user:manage` / `role:manage` / `platform:manage`）   |
+| `operator` | 运营   | 业务读写（除 `mcp:approve` / `user:manage` / `role:manage` / `platform:manage` 外的 13 个） |
+| `user`     | 默认角色 | 只读（`agent:read` / `mcp:read` / `model:read` / `workflow:read` / `skill:read` / `kb:read`）     |
 
 - 用户被停用或删除后，其存量 JWT 立即失效。
 - 菜单与按钮按当前用户权限动态显示；无权限的页面直接访问返回 403。
@@ -364,6 +369,22 @@ curl -X POST http://localhost:8080/api/v1/webhooks/workflows/<webhook_token> \
 - 状态跟踪（外部系统）：`GET /api/v1/webhooks/workflows/<webhook_token>/executions/<data.id>`——仅凭 webhook token 即可轮询（仅本工作流、返回状态视图，不含输入/输出 payload）
 - 状态跟踪（平台内部）：`GET /api/v1/workflow-executions/<data.id>`（需用户 JWT，含节点级完整详情）
 
+### 12. 知识库
+
+1. **入口**：左侧菜单「知识库」（需 `kb:read`）。分类 / 条目管理：两级分类树（顶级 + 子级，同名允许跨父级、同级唯一，展示「父/子」路径；新建 / 编辑可选父级）、条目新建 / 编辑 / 归档 / 恢复 / 搜索（删除保护：有条目 409、有子级 409）。
+2. **Agent 绑定**：Agent 新建 / 编辑表单「知识库」区块两级 TreeSelect 绑定分类（勾选顶级自动含其子级；每个分类可单独降权「只读」——只读可检索、禁止总结入库写入）+ 设置检索模式（`auto` 自动注入 + 工具 / `tool` 仅工具 / `off` 不启用）；Agent 详情页「知识库」页签提供绑定视图（含只读 Tag + 父级路径）+ 试算卡片。
+3. **一键总结入库**：对话面板「总结入库」（需会话至少 1 条用户消息）→ LLM 生成草稿（标题 / 正文可编辑，分类下拉仅含**读写**作用域分类并给出建议分类）→ 确认入库（需 `kb:write`，目标分类须在 Agent 读写绑定作用域内——含绑定顶级的子级，只读分类及其子级 403；`source=chat_summary` 记录来源会话 / Agent）。Agent 无任何读写绑定时按钮禁用（tooltip 提示补绑）。
+4. **平台设置**：「系统管理 → 平台设置」知识库 (M11) 区块：总开关 + 向量化 / rerank / 总结模型（向量化模型保存时维度校验，rerank 模型连通性探测）+「向量回填」任务面板（存在未向量化块时提示；启动 / 进度条轮询 / 批边界取消 / 最近 20 条任务列表，服务重启残留任务自动标失败可再启动）。
+5. **条目分块 (M11.5)**：长条目（正文 > `KB_CHUNK_THRESHOLD`）按 Markdown 结构自动分块（块级向量召回，长文命中精度提升；短条目 1 块行为不变）。条目详情抽屉「分块」页签查看块列表 / 向量化状态；试算与注入对长条目展示**最佳命中块**摘录（`matched_chunk`）。`KB_CHUNK_ENABLED=false` 可整体回退整条向量路径。
+6. **可观测**：对话应答 `execution_meta` 含 `kb_injected`（本轮注入条目）与 `kb_searches`（每轮检索记录，含状态 / 耗时）。
+
+### 13. 记忆 (M10)
+
+1. **入口**：Agent 详情页「记忆」页签（需 `agent:read`）；列表 / 筛选（种类 / 来源 / 状态），新建 / 编辑 / 删除 / 启用停用（写操作需 `agent:write`，留审计痕）。
+2. **三层记忆**：L1 会话滚动摘要（长会话早期消息压缩注入）；L2 结构化长期记忆（跨会话持久化，对话时按打分检索注入「长期记忆」段）；L3 语义检索增强（可选，平台设置配置 memory_embed_model 后融合 embedding 相似度）。
+3. **自动抽取**：每轮对话结束后异步 LLM 抽取事实 → 去重 upsert（best-effort，不阻塞对话）；抽取模型可在平台设置配置（memory_extract_model，留空 = 使用 Agent 当前模型）。
+4. **用户级记忆**：来源为用户的记忆仅对同用户的会话可见可用（属主隔离）。
+
 ## 典型端到端流程
 
 1. 按「快速开始」启动依赖、后端、前端（可选启动 mock MCP / mock Model 服务器）。
@@ -502,3 +523,21 @@ curl -X POST http://localhost:8080/api/v1/webhooks/workflows/<webhook_token> \
 - POST   /api/v1/workflow-executions/:id/cancel - 取消执行 [workflow:execute]
 - POST   /api/v1/webhooks/workflows/:token - Webhook 触发 (公开端点, token 鉴权, payload 作为执行输入)
 - GET    /api/v1/webhooks/workflows/:token/executions/:id - 执行状态公开查询 (token 鉴权, 仅本工作流, 状态视图不含输入/输出 payload)
+
+## KB API (需 Bearer Token)
+
+- GET    /api/v1/kb/categories - 分类列表 (含 active 条目数) [kb:read]
+- POST   /api/v1/kb/categories - 创建分类 {"name","description"} [kb:write]
+- PUT    /api/v1/kb/categories/:id - 更新分类 [kb:write]
+- DELETE /api/v1/kb/categories/:id - 删除分类 (有条目 409) [kb:write]
+- GET    /api/v1/kb/documents - 条目列表 (category_id/keyword/source/status 过滤, 分页) [kb:read]
+- POST   /api/v1/kb/documents - 创建条目 (chat_summary 须 source_session_id/source_agent_id + 归属/绑定校验) [kb:write]
+- GET    /api/v1/kb/documents/:id - 条目详情 [kb:read]
+- PUT    /api/v1/kb/documents/:id - 更新条目 (null 字段不变; 正文变更重新触发向量化) [kb:write]
+- DELETE /api/v1/kb/documents/:id - 删除条目 [kb:write]
+- PATCH  /api/v1/kb/documents/:id/status - 归档 / 恢复 {"status":"active"|"archived"} [kb:write]
+- GET    /api/v1/kb/search - 平台试算检索 (query/category_ids/top_k, 两阶段检索) [kb:read]
+- POST   /api/v1/kb/documents/backfill-embeddings - 向量回填 (需已配置 embedding 模型) [kb:write]
+- GET    /api/v1/agents/:id/kb - Agent 知识库绑定视图 (categories + kb_search_mode) [agent:read]
+- GET    /api/v1/agents/:id/kb/search - Agent 试算检索 (绑定作用域, query/top_k) [agent:read]
+- POST   /api/v1/agents/:id/sessions/:sid/kb-summary - 一键总结草稿 {"focus"?} (入库另走 POST /kb/documents) [agent:read]

@@ -14,15 +14,27 @@ import {
   Slider,
   Space,
   Spin,
+  Switch,
+  TreeSelect,
 } from 'antd';
 import { ArrowLeftOutlined, SaveOutlined } from '@ant-design/icons';
 import { agentApi } from '@/api/agent';
+import { kbApi } from '@/api/kb';
 import { mcpApi } from '@/api/mcp';
 import { modelApi } from '@/api/model';
 import { skillApi } from '@/api/skill';
 import { getErrorMessage } from '@/api/client';
-import { MCP_STATUS_MAP, SKILL_USAGE_MODE_MAP } from '@/utils/constants';
-import type { Agent, AgentBoundMCP, MCPServer, ModelTemplate, Skill, SkillsUsageMode } from '@/types';
+import { KB_SEARCH_MODE_MAP, MCP_STATUS_MAP, SKILL_USAGE_MODE_MAP } from '@/utils/constants';
+import type {
+  Agent,
+  AgentBoundMCP,
+  KBCategory,
+  KBSearchMode,
+  MCPServer,
+  ModelTemplate,
+  Skill,
+  SkillsUsageMode,
+} from '@/types';
 
 interface AgentFormValues {
   name: string;
@@ -36,6 +48,9 @@ interface AgentFormValues {
   mcp_ids?: string[];
   skills?: string[];
   skills_usage_mode?: string;
+  knowledge_categories?: string[];
+  knowledge_categories_readonly?: string[];
+  kb_search_mode?: string;
 }
 
 export function AgentFormPage() {
@@ -51,6 +66,7 @@ export function AgentFormPage() {
   const [models, setModels] = useState<ModelTemplate[]>([]);
   const [mcps, setMcps] = useState<MCPServer[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [kbCategories, setKbCategories] = useState<KBCategory[]>([]);
   const [toolOptions, setToolOptions] = useState<{ value: string; label: string }[]>([]);
   const [loadingTools, setLoadingTools] = useState(false);
 
@@ -93,6 +109,13 @@ export function AgentFormPage() {
       } catch {
         // 技能加载失败不阻塞表单
       }
+      // 知识库分类列表 (M11)
+      try {
+        const res = await kbApi.listCategories();
+        if (!cancelled) setKbCategories(res.data?.items ?? []);
+      } catch {
+        // 知识库分类加载失败不阻塞表单
+      }
       // 编辑模式: 加载 Agent + 绑定 MCP
       if (isEdit && id) {
         try {
@@ -118,6 +141,9 @@ export function AgentFormPage() {
               mcp_ids: boundMCPS.map((m) => m.id),
               skills: (skillRes.data?.skills ?? []).map((s) => s.id),
               skills_usage_mode: a.config.skills_usage_mode ?? 'metadata_injection',
+              knowledge_categories: [...(a.config.knowledge_categories ?? []), ...(a.config.knowledge_categories_readonly ?? [])],
+              knowledge_categories_readonly: a.config.knowledge_categories_readonly ?? [],
+              kb_search_mode: a.config.kb_search_mode || 'auto',
             });
             if (boundMCPS.length > 0) {
               applyToolOptions(boundMCPS);
@@ -199,9 +225,68 @@ export function AgentFormPage() {
     }
   };
 
+  // 知识库分类两级树数据 (M11.5: 顶级 + 子级)
+  const kbTreeData = useMemo(
+    () =>
+      kbCategories
+        .filter((c) => !c.parent_id)
+        .map((c) => ({
+          value: c.id,
+          title: `${c.name} (${c.document_count ?? 0} 条)`,
+          children: kbCategories
+            .filter((k) => k.parent_id === c.id)
+            .map((k) => ({ value: k.id, title: `${k.name} (${k.document_count ?? 0} 条)` })),
+        })),
+    [kbCategories],
+  );
+
+  const kbCatById = useMemo(() => new Map(kbCategories.map((c) => [c.id, c])), [kbCategories]);
+  const kbCatPath = (c: KBCategory) => {
+    if (!c.parent_id) return c.name;
+    const parent = kbCatById.get(c.parent_id);
+    return parent ? `${parent.name}/${c.name}` : c.name;
+  };
+
+  const watchedKbCategories = Form.useWatch('knowledge_categories', form);
+  // knowledge_categories_readonly 无对应 Form.Item (未注册字段): useWatch 默认只读已注册字段, 永远取到 undefined,
+  // 必须 preserve: true 从完整 store 读取, 否则「只读」开关点了没反应
+  const watchedKbReadOnly = Form.useWatch('knowledge_categories_readonly', { form, preserve: true });
+
+  const setKbReadOnly = (categoryID: string, readOnly: boolean) => {
+    const current = (form.getFieldValue('knowledge_categories_readonly') as string[] | undefined) ?? [];
+    const next = readOnly ? Array.from(new Set([...current, categoryID])) : current.filter((x) => x !== categoryID);
+    form.setFieldValue('knowledge_categories_readonly', next);
+  };
+
+  // 选择变化时清理已取消分类的只读标记
+  useEffect(() => {
+    const ro = (form.getFieldValue('knowledge_categories_readonly') as string[] | undefined) ?? [];
+    if (ro.length === 0) return;
+    const selected = new Set(watchedKbCategories ?? []);
+    const kept = ro.filter((rid) => selected.has(rid));
+    if (kept.length !== ro.length) {
+      form.setFieldValue('knowledge_categories_readonly', kept);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchedKbCategories]);
+
+  // 前端去重: 顶级与子级同勾时仅保留顶级 (后端按顶级扩展检索范围)
+  const dedupKbCategories = (ids: string[]) => {
+    const selected = new Set(ids);
+    return ids.filter((id) => {
+      const cat = kbCatById.get(id);
+      return !cat?.parent_id || !selected.has(cat.parent_id);
+    });
+  };
+
   const onSubmit = async (values: AgentFormValues) => {
     setSubmitting(true);
     try {
+      // M11.5: 前端去重 (顶级+子级同勾仅提交顶级) 并拆分 读写/只读 双集合
+      const kbAll = dedupKbCategories(values.knowledge_categories ?? []);
+      // onFinish 的 values 只含已注册字段, 只读列表须直接读 form store
+      const kbReadonly = ((form.getFieldValue('knowledge_categories_readonly') as string[] | undefined) ?? []).filter((rid) => kbAll.includes(rid));
+      const kbReadWrite = kbAll.filter((cid) => !kbReadonly.includes(cid));
       const payload = {
         name: values.name,
         description: values.description,
@@ -214,6 +299,9 @@ export function AgentFormPage() {
         mcp_ids: values.mcp_ids ?? [],
         skills: values.skills ?? [],
         skills_usage_mode: values.skills_usage_mode || 'metadata_injection',
+        knowledge_categories: kbReadWrite,
+        knowledge_categories_readonly: kbReadonly,
+        kb_search_mode: values.kb_search_mode || 'auto',
       };
       if (isEdit && id) {
         await agentApi.update(id, payload);
@@ -268,7 +356,7 @@ export function AgentFormPage() {
         form={form}
         layout="vertical"
         onFinish={onSubmit}
-        initialValues={{ temperature: 0.7, mcp_ids: [], tools: [], skills: [], skills_usage_mode: 'metadata_injection' }}
+        initialValues={{ temperature: 0.7, mcp_ids: [], tools: [], skills: [], skills_usage_mode: 'metadata_injection', knowledge_categories: [], knowledge_categories_readonly: [], kb_search_mode: 'auto' }}
       >
         <Form.Item
           name="name"
@@ -342,6 +430,59 @@ export function AgentFormPage() {
             options={(Object.keys(SKILL_USAGE_MODE_MAP) as SkillsUsageMode[]).map((key) => ({
               value: key,
               label: `${SKILL_USAGE_MODE_MAP[key].label} — ${SKILL_USAGE_MODE_MAP[key].hint}`,
+            }))}
+          />
+        </Form.Item>
+        <Form.Item
+          name="knowledge_categories"
+          label="知识库分类"
+          tooltip="绑定本 Agent 可引用的知识库分类; 检索范围 = 绑定分类及其子级 (勾选顶级自动含子级); 留空 = 不绑定"
+          extra={
+            (watchedKbCategories ?? []).length > 0 ? (
+              <div style={{ paddingTop: 4 }}>
+                <div style={{ marginBottom: 6, fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
+                  只读绑定: Agent 可检索但不可写入 (新增条目 / 对话摘要); 顶级与子级同时勾选时以顶级为准
+                </div>
+                {(watchedKbCategories ?? [])
+                  .map((cid) => kbCatById.get(cid))
+                  .filter((c): c is KBCategory => Boolean(c))
+                  .map((c) => (
+                    <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <span style={{ width: 300 }} title={kbCatPath(c)}>
+                        {kbCatPath(c)}
+                      </span>
+                      <Switch
+                        size="small"
+                        checked={(watchedKbReadOnly ?? []).includes(c.id)}
+                        onChange={(checked) => setKbReadOnly(c.id, checked)}
+                      />
+                      <span>只读</span>
+                    </div>
+                  ))}
+              </div>
+            ) : undefined
+          }
+        >
+          <TreeSelect
+            multiple
+            allowClear
+            showSearch
+            treeDefaultExpandAll
+            placeholder="选择要绑定的知识库分类"
+            treeData={kbTreeData}
+            treeNodeFilterProp="title"
+            notFoundContent={kbCategories.length === 0 ? '暂无知识库分类, 请到知识库管理创建' : '无匹配项'}
+          />
+        </Form.Item>
+        <Form.Item
+          name="kb_search_mode"
+          label="知识库检索模式"
+          tooltip="自动: 每轮自动注入 top-K 知识参考并注册 search_knowledge 工具; 仅工具: 仅注册工具, 模型按需检索; 关闭: 不启用知识库检索"
+        >
+          <Select
+            options={(Object.keys(KB_SEARCH_MODE_MAP) as KBSearchMode[]).map((key) => ({
+              value: key,
+              label: `${KB_SEARCH_MODE_MAP[key].label} — ${KB_SEARCH_MODE_MAP[key].hint}`,
             }))}
           />
         </Form.Item>

@@ -44,6 +44,7 @@ const memExtractSystemPrompt = `你是一个记忆抽取器。从给定对话中
 不要提取: 一次性任务细节、临时上下文、寒暄。
 输出严格 JSON 数组 (无其他文本):
 [{"content": "一句话记忆(<=80字)", "kind": "preference|fact|decision|event", "reason": "提取理由(<=30字)"}]
+最多输出 3 条; 候选超过 3 条时只保留最重要的 3 条。
 没有可提取内容时输出 []。`
 
 // memSummarySystemPrompt 滚动摘要提示词 (设计文档 §7)
