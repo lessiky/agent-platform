@@ -14,9 +14,10 @@ import (
 
 // WorkflowListFilter 工作流列表过滤
 type WorkflowListFilter struct {
-	Status string
-	Page   int
-	Size   int
+	Status       string
+	ReviewStatus string // 审核状态过滤 (pending/approved/rejected)
+	Page         int
+	Size         int
 }
 
 // ExecutionListFilter 执行记录列表过滤
@@ -91,6 +92,9 @@ func (r *workflowRepository) List(ctx context.Context, filter WorkflowListFilter
 	query := database.DB.WithContext(ctx).Model(&model.Workflow{})
 	if filter.Status != "" {
 		query = query.Where("status = ?", filter.Status)
+	}
+	if filter.ReviewStatus != "" {
+		query = query.Where("review_status = ?", filter.ReviewStatus)
 	}
 	var total int64
 	if err := query.Count(&total).Error; err != nil {

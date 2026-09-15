@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { App, Button, Card, Checkbox, Empty, Input, List, Modal, Popconfirm, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Card, Checkbox, Empty, Input, List, Modal, Popconfirm, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd';
 import { AuditOutlined, BookOutlined, BulbOutlined, DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, StopOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons';
 import { agentApi, chatStream, type ChatStreamEventPayload } from '@/api/agent';
 import { kbApi } from '@/api/kb';
@@ -43,7 +43,15 @@ interface StreamProgress {
   thinking: StreamThinkingSeg[]; // 思考过程 (显示思考过程开启时, 按轮次分段累积)
 }
 
-export function ChatPanel({ agentId }: { agentId: string }) {
+export function ChatPanel({
+  agentId,
+  reviewStatus = 'approved',
+}: {
+  agentId: string;
+  reviewStatus?: string;
+}) {
+  // 审核门: 审核中/已驳回时禁止发起会话 (后端同样拦截)
+  const reviewBlocked = reviewStatus === 'pending' || reviewStatus === 'rejected';
   const { message } = App.useApp();
   const navigate = useNavigate();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -600,10 +608,22 @@ export function ChatPanel({ agentId }: { agentId: string }) {
           <div ref={bottomRef} />
         </div>
         <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 12, marginTop: 8 }}>
+          {reviewBlocked && (
+            <Alert
+              type={reviewStatus === 'rejected' ? 'error' : 'warning'}
+              showIcon
+              style={{ marginBottom: 8 }}
+              message={
+                reviewStatus === 'rejected'
+                  ? 'Agent 审核已驳回, 暂不可发起会话, 请修改并重新提交审核'
+                  : 'Agent 审核中, 暂不可发起会话, 请等待管理员审核通过'
+              }
+            />
+          )}
           <Space.Compact style={{ width: '100%' }}>
             <Input.TextArea
               autoSize={{ minRows: 1, maxRows: 4 }}
-              placeholder='输入用户提示词, Enter 发送, Shift+Enter 换行'
+              placeholder={reviewBlocked ? '审核中不可发起会话' : '输入用户提示词, Enter 发送, Shift+Enter 换行'}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onPressEnter={(e) => {
@@ -612,9 +632,9 @@ export function ChatPanel({ agentId }: { agentId: string }) {
                   onSend();
                 }
               }}
-              disabled={sending}
+              disabled={sending || reviewBlocked}
             />
-            <Button type='primary' icon={<SendOutlined />} loading={sending} onClick={onSend}>
+            <Button type='primary' icon={<SendOutlined />} loading={sending} disabled={reviewBlocked} onClick={onSend}>
               发送
             </Button>
             {sending && (

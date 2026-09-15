@@ -37,6 +37,11 @@ export interface Workflow {
   description: string;
   definition: WorkflowDefinition;
   status: 'draft' | 'active' | 'archived';
+  // 审核状态: 新建/修改后为 pending, 管理员审核通过后为 approved (仅 approved 可运行)
+  review_status: 'pending' | 'approved' | 'rejected';
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  review_comment?: string | null;
   input_schema?: unknown;
   output_schema?: unknown;
   version: number;

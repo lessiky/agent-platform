@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { App, Button, Card, Input, Popconfirm, Select, Space, Table } from 'antd';
+import { App, Button, Card, Input, Popconfirm, Select, Space, Table, Tag } from 'antd';
 import {
   CaretRightOutlined,
   DeleteOutlined,
@@ -13,7 +13,7 @@ import { agentApi } from '@/api/agent';
 import { getErrorMessage } from '@/api/client';
 import { AgentStatusTag } from '@/components/common/StatusTag';
 import type { Agent, AgentStatus } from '@/types';
-import { AGENT_STATUS_MAP } from '@/utils/constants';
+import { AGENT_STATUS_MAP, REVIEW_STATUS_MAP } from '@/utils/constants';
 import { formatDateTime } from '@/utils/format';
 
 const REFRESH_INTERVAL = 10000; // 列表 10s 轮询保持状态新鲜
@@ -109,6 +109,19 @@ export function AgentListPage() {
       dataIndex: 'status',
       width: 100,
       render: (s: AgentStatus) => <AgentStatusTag status={s} />,
+    },
+    {
+      title: '审核状态',
+      dataIndex: 'review_status',
+      width: 100,
+      render: (s: string, record: Agent) => {
+        const item = REVIEW_STATUS_MAP[s] ?? { label: s, color: 'default' };
+        return (
+          <span title={record.review_comment || undefined}>
+            <Tag color={item.color}>{item.label}</Tag>
+          </span>
+        );
+      },
     },
     { title: '模型', dataIndex: ['config', 'model'], width: 140, render: (m?: string) => m || '-' },
     { title: '版本', dataIndex: 'version', width: 70, render: (v: number) => `v${v}` },

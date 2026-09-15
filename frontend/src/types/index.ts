@@ -80,12 +80,19 @@ export interface AgentConfig {
   kb_search_mode?: string; // 知识库检索模式 (M11: auto/tool/off, 空 = auto)
 }
 
+// 审核状态 (Agent/工作流共用): 新建/修改后为 pending, 管理员审核通过后为 approved
+export type ReviewStatus = 'pending' | 'approved' | 'rejected';
+
 export interface Agent {
   id: string;
   name: string;
   description: string;
   model_id: string | null;
   status: AgentStatus;
+  review_status: ReviewStatus;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_comment: string | null;
   version: number;
   config: AgentConfig;
   team_id: string | null;
@@ -172,6 +179,7 @@ export interface DashboardData {
 export interface AgentQuery {
   q?: string;
   status?: AgentStatus;
+  review_status?: ReviewStatus;
   page?: number;
   size?: number;
 }

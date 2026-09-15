@@ -7,6 +7,7 @@ import { workflowApi, type AIGenerateResult, type Workflow } from '@/api/workflo
 import { AIGenerateWorkflowModal } from './AIGenerateWorkflowModal';
 import { getErrorMessage } from '@/api/client';
 import { formatDateTime, timeAgo } from '@/utils/format';
+import { REVIEW_STATUS_MAP } from '@/utils/constants';
 
 const STATUS_MAP: Record<string, { label: string; color: string }> = {
   draft: { label: '草稿', color: 'default' },
@@ -119,6 +120,16 @@ export function WorkflowListPage() {
       dataIndex: 'status',
       width: 100,
       render: (s: string) => <Tag color={STATUS_MAP[s]?.color}>{STATUS_MAP[s]?.label ?? s}</Tag>,
+    },
+    {
+      title: '审核状态',
+      dataIndex: 'review_status',
+      width: 100,
+      render: (s: string, record) => (
+        <span title={record.review_comment || undefined}>
+          <Tag color={REVIEW_STATUS_MAP[s]?.color}>{REVIEW_STATUS_MAP[s]?.label ?? s}</Tag>
+        </span>
+      ),
     },
     {
       title: '定时调度',

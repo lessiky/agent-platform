@@ -1,7 +1,7 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import { MainLayout } from '@/layouts/MainLayout';
 import { AuthLayout } from '@/layouts/AuthLayout';
-import { RequireAuth, RequirePermission } from './guards';
+import { RequireAuth, RequirePermission, RequireAnyPermission } from './guards';
 import { LoginPage } from '@/pages/auth/LoginPage';
 import { DashboardPage } from '@/pages/dashboard/DashboardPage';
 import { AgentListPage } from '@/pages/agent/AgentListPage';
@@ -12,6 +12,7 @@ import { MCPListPage } from '@/pages/mcp/MCPListPage';
 import { MCPFormPage } from '@/pages/mcp/MCPFormPage';
 import { MCPDetailPage } from '@/pages/mcp/MCPDetailPage';
 import { ApprovalCenterPage } from '@/pages/mcp/ApprovalCenterPage';
+import { ReviewCenterPage } from '@/pages/review/ReviewCenterPage';
 import { WorkflowListPage } from '@/pages/workflow/WorkflowListPage';
 import { WorkflowEditorPage } from '@/pages/workflow/WorkflowEditorPage';
 import { WorkflowDetailPage } from '@/pages/workflow/WorkflowDetailPage';
@@ -55,6 +56,14 @@ export const router = createBrowserRouter([
       { path: 'mcp/:id', element: <MCPDetailPage /> },
       { path: 'mcp/:id/edit', element: <MCPFormPage /> },
       { path: 'approvals', element: <ApprovalCenterPage /> },
+      {
+        path: 'reviews',
+        element: (
+          <RequireAnyPermission codes={['agent:review', 'workflow:review']}>
+            <ReviewCenterPage />
+          </RequireAnyPermission>
+        ),
+      },
       { path: 'models', element: <ModelListPage /> },
       { path: 'models/new', element: <ModelFormPage /> },
       { path: 'models/:id', element: <ModelDetailPage /> },

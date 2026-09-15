@@ -14,10 +14,11 @@ import (
 
 // AgentListFilter Agent 列表查询条件
 type AgentListFilter struct {
-	Keyword  string // 名称/描述模糊搜索
-	Status   string
-	Page     int
-	PageSize int
+	Keyword      string // 名称/描述模糊搜索
+	Status       string
+	ReviewStatus string // 审核状态过滤 (pending/approved/rejected)
+	Page         int
+	PageSize     int
 }
 
 // AgentLogFilter Agent 日志查询条件
@@ -39,6 +40,8 @@ type AgentRepository interface {
 	Update(ctx context.Context, agent *model.Agent) error
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, filter AgentListFilter) ([]*model.Agent, int64, error)
+	// ListByIDs 按 ID 批量查询 Agent (工作流运行前预检 agent 审核状态用)
+	ListByIDs(ctx context.Context, ids []string) ([]model.Agent, error)
 	CountByStatus(ctx context.Context) (map[string]int64, error)
 }
 
@@ -94,6 +97,9 @@ func (r *agentRepository) List(ctx context.Context, filter AgentListFilter) ([]*
 	if filter.Status != "" {
 		query = query.Where("status = ?", filter.Status)
 	}
+	if filter.ReviewStatus != "" {
+		query = query.Where("review_status = ?", filter.ReviewStatus)
+	}
 
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -109,6 +115,15 @@ func (r *agentRepository) List(ctx context.Context, filter AgentListFilter) ([]*
 		return nil, 0, err
 	}
 	return agents, total, nil
+}
+
+func (r *agentRepository) ListByIDs(ctx context.Context, ids []string) ([]model.Agent, error) {
+	if len(ids) == 0 {
+		return []model.Agent{}, nil
+	}
+	var agents []model.Agent
+	err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&agents).Error
+	return agents, err
 }
 
 func (r *agentRepository) CountByStatus(ctx context.Context) (map[string]int64, error) {

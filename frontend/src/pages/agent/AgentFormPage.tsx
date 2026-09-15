@@ -305,11 +305,17 @@ export function AgentFormPage() {
       };
       if (isEdit && id) {
         await agentApi.update(id, payload);
-        message.success('更新成功，已产生新版本');
+        message.success({
+          content: '更新成功，已产生新版本；Agent 已进入审核中状态，需管理员审核通过后方可使用',
+          duration: 4,
+        });
         navigate(`/agents/${id}`);
       } else {
         const res = await agentApi.create(payload);
-        message.success('创建成功');
+        message.success({
+          content: '创建成功；Agent 已进入审核中状态，需管理员审核通过后方可使用',
+          duration: 4,
+        });
         navigate(`/agents/${res.data?.id ?? ''}`, { replace: true });
       }
     } catch (err) {

@@ -60,7 +60,7 @@ func (f *fakeAgentRepo) GetByName(_ context.Context, name string) (*model.Agent,
 			return a, nil
 		}
 	}
-	return nil, nil
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (f *fakeAgentRepo) Update(_ context.Context, a *model.Agent) error {
@@ -79,6 +79,18 @@ func (f *fakeAgentRepo) Delete(_ context.Context, id string) error {
 
 func (f *fakeAgentRepo) List(_ context.Context, _ repository.AgentListFilter) ([]*model.Agent, int64, error) {
 	return nil, 0, nil
+}
+
+func (f *fakeAgentRepo) ListByIDs(_ context.Context, ids []string) ([]model.Agent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	result := make([]model.Agent, 0, len(ids))
+	for _, id := range ids {
+		if a, ok := f.items[id]; ok {
+			result = append(result, *a)
+		}
+	}
+	return result, nil
 }
 
 func (f *fakeAgentRepo) CountByStatus(_ context.Context) (map[string]int64, error) {

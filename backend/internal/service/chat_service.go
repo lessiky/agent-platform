@@ -120,15 +120,15 @@ type ChatService interface {
 }
 
 type chatService struct {
-	agents   repository.AgentRepository
-	sessions repository.ChatSessionRepository
-	messages repository.ChatMessageRepository
-	logs     repository.AgentLogRepository
-	mcpSvc   MCPServerService
-	modelSvc ModelTemplateService
-	stats    repository.AgentCallStatRepository
-	skills   SkillService
-	memSvc   MemoryService // 长期记忆注入 (M10.1), 可为 nil (不注入)
+	agents     repository.AgentRepository
+	sessions   repository.ChatSessionRepository
+	messages   repository.ChatMessageRepository
+	logs       repository.AgentLogRepository
+	mcpSvc     MCPServerService
+	modelSvc   ModelTemplateService
+	stats      repository.AgentCallStatRepository
+	skills     SkillService
+	memSvc     MemoryService    // 长期记忆注入 (M10.1), 可为 nil (不注入)
 	memExtract *MemoryExtractor // turn 结束异步管线: 自动抽取 + 滚动摘要 (M10.2), 可为 nil
 	// 知识库 (M11): 注入 + search_knowledge 工具; 均为 nil 时行为与 M11 之前一致
 	kbRetriever *KBRetriever
@@ -325,6 +325,19 @@ func (s *chatService) recordStat(agentID string, start time.Time, tokens int, fa
 }
 
 // Chat 执行一次对话: 组装上下文 -> 模型调用 (路由/故障转移/配额) -> (工具调用轮) -> 落库 -> 返回
+// assertAgentUsable 审核门: 仅审核通过 (approved) 的 Agent 可被调用;
+// 外部 API 调用 / 工作流 agent 节点 / 会话发起 共用该校验 (需求: 审核中的 agent
+// 不允许外部接口调用, 不允许被工作流调用, 不允许发起会话)
+func assertAgentUsable(agent *model.Agent) error {
+	switch agent.ReviewStatus {
+	case model.AgentReviewPending:
+		return errors.NewValidationError("Agent 审核中, 管理员审核通过前禁止调用")
+	case model.AgentReviewRejected:
+		return errors.NewValidationError("Agent 审核已驳回, 请修改并重新提交审核后再调用")
+	}
+	return nil
+}
+
 func (s *chatService) Chat(ctx context.Context, agentID string, req ChatRequest, operatorID string) (*ChatResult, error) {
 	message := strings.TrimSpace(req.Message)
 	if message == "" {
@@ -340,6 +353,9 @@ func (s *chatService) Chat(ctx context.Context, agentID string, req ChatRequest,
 	}
 	var agentCfg AgentConfig
 	_ = json.Unmarshal(agent.Config, &agentCfg)
+	if err := assertAgentUsable(agent); err != nil {
+		return nil, err
+	}
 
 	// 会话: 指定则校验归属, 否则新建
 	var session *model.ChatSession
@@ -385,6 +401,9 @@ func (s *chatService) ChatStream(ctx context.Context, agentID string, req ChatRe
 	}
 	var agentCfg AgentConfig
 	_ = json.Unmarshal(agent.Config, &agentCfg)
+	if err := assertAgentUsable(agent); err != nil {
+		return nil, err
+	}
 
 	var session *model.ChatSession
 	if req.SessionID != nil && strings.TrimSpace(*req.SessionID) != "" {
@@ -436,6 +455,9 @@ func (s *chatService) Invoke(ctx context.Context, agentID string, req InvokeRequ
 	}
 	var agentCfg AgentConfig
 	_ = json.Unmarshal(agent.Config, &agentCfg)
+	if err := assertAgentUsable(agent); err != nil {
+		return nil, err
+	}
 
 	// 会话: 指定则校验归属, 否则新建 (外部会话; 审核通过后的模型续答落库依赖会话存在)
 	var session *model.ChatSession
@@ -491,6 +513,9 @@ func (s *chatService) InvokeAsync(ctx context.Context, agentID string, req Invok
 	}
 	var agentCfg AgentConfig
 	_ = json.Unmarshal(agent.Config, &agentCfg)
+	if err := assertAgentUsable(agent); err != nil {
+		return nil, err
+	}
 
 	var session *model.ChatSession
 	if req.SessionID != nil && strings.TrimSpace(*req.SessionID) != "" {
@@ -601,8 +626,8 @@ func (s *chatService) finishExecution(executionID, status, errMsg string, result
 // (session_id / total_tokens / latency_ms / mcp_calls 等);
 // pre_review_mcp_calls 为命中审核门禁轮 (审核前) 的工具调用明细, 含对应 pending 项
 type approvalResultPayload struct {
-	ApprovalID        string `json:"approval_id"`
-	ApprovalStatus    string `json:"approval_status"`
+	ApprovalID     string `json:"approval_id"`
+	ApprovalStatus string `json:"approval_status"`
 	ChatResult
 	PreReviewMCPCalls []MCPChatCall `json:"pre_review_mcp_calls,omitempty"`
 }

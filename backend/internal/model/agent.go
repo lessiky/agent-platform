@@ -38,20 +38,32 @@ const (
 	APIKeyStatusRevoked = "revoked"
 )
 
+// Agent 审核状态 (与运行时状态正交, 控制调用资格)
+const (
+	AgentReviewPending  = "pending"  // 审核中 (新建/修改后自动进入)
+	AgentReviewApproved = "approved" // 审核通过
+	AgentReviewRejected = "rejected" // 已驳回
+)
+
 // Agent Agent 定义
 type Agent struct {
-	ID          string         `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
-	Name        string         `gorm:"type:varchar(64);not null" json:"name"`
-	Description string         `gorm:"type:text" json:"description"`
-	ModelID     *string        `gorm:"type:uuid" json:"model_id"` // 关联模型模板 (M4)
-	Status      string         `gorm:"type:varchar(16);not null;default:'idle';index" json:"status"`
-	Version     int            `gorm:"not null;default:1" json:"version"`
-	Config      datatypes.JSON `gorm:"type:jsonb;default:'{}'" json:"config"`
-	TeamID      *string        `gorm:"type:uuid" json:"team_id"` // 所属团队 (预留)
-	CreatedBy   *string        `gorm:"type:uuid" json:"created_by"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	ID          string  `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	Name        string  `gorm:"type:varchar(64);not null" json:"name"`
+	Description string  `gorm:"type:text" json:"description"`
+	ModelID     *string `gorm:"type:uuid" json:"model_id"` // 关联模型模板 (M4)
+	Status      string  `gorm:"type:varchar(16);not null;default:'idle';index" json:"status"`
+	// 审核状态: 仅 approved 允许外部调用/被工作流调用/发起会话
+	ReviewStatus  string         `gorm:"type:varchar(16);not null;default:'approved';index" json:"review_status"`
+	ReviewedBy    *string        `gorm:"type:uuid" json:"reviewed_by"`
+	ReviewedAt    *time.Time     `json:"reviewed_at"`
+	ReviewComment *string        `gorm:"type:text" json:"review_comment"` // 审核意见 / 驳回原因
+	Version       int            `gorm:"not null;default:1" json:"version"`
+	Config        datatypes.JSON `gorm:"type:jsonb;default:'{}'" json:"config"`
+	TeamID        *string        `gorm:"type:uuid" json:"team_id"` // 所属团队 (预留)
+	CreatedBy     *string        `gorm:"type:uuid" json:"created_by"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 func (Agent) TableName() string {

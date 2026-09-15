@@ -42,41 +42,41 @@ type AgentConfig struct {
 
 // CreateAgentRequest 创建 Agent 请求
 type CreateAgentRequest struct {
-	Name            string   `json:"name" binding:"required,min=2,max=64"`
-	Description     string   `json:"description" binding:"max=512"`
-	ModelID         string   `json:"model_id"` // 关联模型模板 (M4)
-	Model           string   `json:"model" binding:"required"`
-	SystemPrompt    string   `json:"system_prompt"`
-	Temperature     float64  `json:"temperature"`
-	MaxTokens       int      `json:"max_tokens"`
-	Tools           []string `json:"tools"`
-	MaxToolRounds   int      `json:"max_tool_rounds"`
-	MCPIDs          []string `json:"mcp_ids"` // 绑定的 MCP 服务器 (可用工具来源)
-	Skills          []string `json:"skills"`  // 绑定的技能包 (M9)
-	TeamID          string   `json:"team_id"`
-	SimulateTraffic bool     `json:"simulate_traffic"`
-	SkillsUsageMode string   `json:"skills_usage_mode"` // 技能注入模式 (M9)
-	KnowledgeCategories         []string `json:"knowledge_categories"`         // 绑定的知识库分类 (M11, nil/空 = 不绑定)
+	Name                        string   `json:"name" binding:"required,min=2,max=64"`
+	Description                 string   `json:"description" binding:"max=512"`
+	ModelID                     string   `json:"model_id"` // 关联模型模板 (M4)
+	Model                       string   `json:"model" binding:"required"`
+	SystemPrompt                string   `json:"system_prompt"`
+	Temperature                 float64  `json:"temperature"`
+	MaxTokens                   int      `json:"max_tokens"`
+	Tools                       []string `json:"tools"`
+	MaxToolRounds               int      `json:"max_tool_rounds"`
+	MCPIDs                      []string `json:"mcp_ids"` // 绑定的 MCP 服务器 (可用工具来源)
+	Skills                      []string `json:"skills"`  // 绑定的技能包 (M9)
+	TeamID                      string   `json:"team_id"`
+	SimulateTraffic             bool     `json:"simulate_traffic"`
+	SkillsUsageMode             string   `json:"skills_usage_mode"`             // 技能注入模式 (M9)
+	KnowledgeCategories         []string `json:"knowledge_categories"`          // 绑定的知识库分类 (M11, nil/空 = 不绑定)
 	KnowledgeCategoriesReadonly []string `json:"knowledge_categories_readonly"` // 只读绑定分类 (M11.5, 与上互斥; nil/空 = 不绑定)
 	KbSearchMode                string   `json:"kb_search_mode"`                // 知识库检索模式 (M11: auto/tool/off, 空 = auto)
 }
 
 // UpdateAgentRequest 更新 Agent 请求 (全量更新; mcp_ids 为 nil 表示绑定不变)
 type UpdateAgentRequest struct {
-	Name            string   `json:"name" binding:"required,min=2,max=64"`
-	Description     string   `json:"description" binding:"max=512"`
-	ModelID         string   `json:"model_id"`
-	Model           string   `json:"model" binding:"required"`
-	SystemPrompt    string   `json:"system_prompt"`
-	Temperature     float64  `json:"temperature"`
-	MaxTokens       int      `json:"max_tokens"`
-	Tools           []string `json:"tools"`
-	MaxToolRounds   int      `json:"max_tool_rounds"`
-	MCPIDs          []string `json:"mcp_ids"`
-	Skills          []string `json:"skills"` // nil 表示关联不变; 空数组 = 清空 (M9)
-	TeamID          string   `json:"team_id"`
-	SimulateTraffic bool     `json:"simulate_traffic"`
-	SkillsUsageMode string   `json:"skills_usage_mode"` // 技能注入模式 (M9)
+	Name                        string   `json:"name" binding:"required,min=2,max=64"`
+	Description                 string   `json:"description" binding:"max=512"`
+	ModelID                     string   `json:"model_id"`
+	Model                       string   `json:"model" binding:"required"`
+	SystemPrompt                string   `json:"system_prompt"`
+	Temperature                 float64  `json:"temperature"`
+	MaxTokens                   int      `json:"max_tokens"`
+	Tools                       []string `json:"tools"`
+	MaxToolRounds               int      `json:"max_tool_rounds"`
+	MCPIDs                      []string `json:"mcp_ids"`
+	Skills                      []string `json:"skills"` // nil 表示关联不变; 空数组 = 清空 (M9)
+	TeamID                      string   `json:"team_id"`
+	SimulateTraffic             bool     `json:"simulate_traffic"`
+	SkillsUsageMode             string   `json:"skills_usage_mode"`             // 技能注入模式 (M9)
 	KnowledgeCategories         []string `json:"knowledge_categories"`          // nil 表示绑定不变; 空数组 = 清空 (M11)
 	KnowledgeCategoriesReadonly []string `json:"knowledge_categories_readonly"` // 只读绑定 (M11.5); nil 表示不变; 空数组 = 清空
 	KbSearchMode                string   `json:"kb_search_mode"`                // 知识库检索模式 (M11, 空 = 不变; auto/tool/off)
@@ -155,14 +155,14 @@ type agentService struct {
 	skillBindings repository.SkillAgentBindingRepository
 	skillRepo     repository.SkillRepository
 	chatSessions  repository.ChatSessionRepository
-	chat          ChatService                       // 对话链路 (API Key /invoke 复用, 返回模型应答)
-	memories      repository.MemoryRepository       // 长期记忆 (M10.1): 删除 Agent 级联清理
-	toolApprovals repository.ToolApprovalRepository // /invoke 202 待审核结果的 Key 鉴权查询
-	modelSvc      ModelTemplateService              // /invoke 降级决策 (无可用模型时走旧链)
-	kbBindings  repository.AgentKBBindingRepository // 知识库分类绑定 (M11)
-	kbCats      repository.KBCategoryRepository     // 知识库分类 (M11, 绑定校验/视图)
-	audits      repository.AuditLogRepository       // 审计 (M11 绑定变更留痕)
-	kbRetriever *KBRetriever                        // 检索试算 (M11), 可为 nil
+	chat          ChatService                         // 对话链路 (API Key /invoke 复用, 返回模型应答)
+	memories      repository.MemoryRepository         // 长期记忆 (M10.1): 删除 Agent 级联清理
+	toolApprovals repository.ToolApprovalRepository   // /invoke 202 待审核结果的 Key 鉴权查询
+	modelSvc      ModelTemplateService                // /invoke 降级决策 (无可用模型时走旧链)
+	kbBindings    repository.AgentKBBindingRepository // 知识库分类绑定 (M11)
+	kbCats        repository.KBCategoryRepository     // 知识库分类 (M11, 绑定校验/视图)
+	audits        repository.AuditLogRepository       // 审计 (M11 绑定变更留痕)
+	kbRetriever   *KBRetriever                        // 检索试算 (M11), 可为 nil
 }
 
 func NewAgentService(
@@ -248,10 +248,12 @@ func (s *agentService) CreateAgent(ctx context.Context, req CreateAgentRequest, 
 		Description: req.Description,
 		ModelID:     strPtr(req.ModelID),
 		Status:      model.AgentStatusIdle,
-		Version:     1,
-		Config:      datatypes.JSON(configJSON),
-		TeamID:      strPtr(req.TeamID),
-		CreatedBy:   strPtr(operatorID),
+		// 新建 -> 审核中, 管理员审核通过前禁止调用/运行
+		ReviewStatus: model.AgentReviewPending,
+		Version:      1,
+		Config:       datatypes.JSON(configJSON),
+		TeamID:       strPtr(req.TeamID),
+		CreatedBy:    strPtr(operatorID),
 	}
 	if err := s.agents.Create(ctx, agent); err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
@@ -466,14 +468,14 @@ func (s *agentService) UpdateAgent(ctx context.Context, id string, req UpdateAge
 	}
 
 	configJSON, err := json.Marshal(AgentConfig{
-		Model:                 req.Model,
-		SystemPrompt:          req.SystemPrompt,
-		Temperature:           req.Temperature,
-		MaxTokens:             req.MaxTokens,
-		Tools:                 req.Tools,
-		MaxToolRounds:         req.MaxToolRounds,
-		SkillsUsageMode:       req.SkillsUsageMode,
-		SimulateTraffic:       req.SimulateTraffic,
+		Model:                       req.Model,
+		SystemPrompt:                req.SystemPrompt,
+		Temperature:                 req.Temperature,
+		MaxTokens:                   req.MaxTokens,
+		Tools:                       req.Tools,
+		MaxToolRounds:               req.MaxToolRounds,
+		SkillsUsageMode:             req.SkillsUsageMode,
+		SimulateTraffic:             req.SimulateTraffic,
 		KnowledgeCategories:         finalKBIDs,
 		KnowledgeCategoriesReadonly: finalKBROIDs,
 		KbSearchMode:                kbSearchMode,
@@ -488,6 +490,11 @@ func (s *agentService) UpdateAgent(ctx context.Context, id string, req UpdateAge
 	agent.Config = datatypes.JSON(configJSON)
 	agent.TeamID = strPtr(req.TeamID)
 	agent.Version++
+	// 修改 -> 回到审核中 (清空上次审核信息)
+	agent.ReviewStatus = model.AgentReviewPending
+	agent.ReviewedBy = nil
+	agent.ReviewedAt = nil
+	agent.ReviewComment = nil
 
 	if err := s.agents.Update(ctx, agent); err != nil {
 		return nil, errors.Wrap(err, "failed to update agent")
@@ -674,6 +681,11 @@ func (s *agentService) RollbackAgent(ctx context.Context, agentID string, versio
 	agent.Description = snapshot.Description
 	agent.Config = snapshot.Config
 	agent.Version++
+	// 回滚 -> 回到审核中 (配置属内容变更)
+	agent.ReviewStatus = model.AgentReviewPending
+	agent.ReviewedBy = nil
+	agent.ReviewedAt = nil
+	agent.ReviewComment = nil
 
 	if err := s.agents.Update(ctx, agent); err != nil {
 		return nil, errors.Wrap(err, "failed to rollback agent")

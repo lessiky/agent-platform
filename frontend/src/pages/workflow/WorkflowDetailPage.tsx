@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { App, Button, Card, Col, Descriptions, Modal, Input, Popconfirm, Row, Space, Table, Tabs, Tag, Timeline, Typography } from 'antd';
+import { Alert, App, Button, Card, Col, Descriptions, Modal, Input, Popconfirm, Row, Space, Table, Tabs, Tag, Timeline, Tooltip, Typography } from 'antd';
 import { ArrowLeftOutlined, CloudDownloadOutlined, DeleteOutlined, EditOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { workflowApi, type PrintOutputEntry, type Workflow, type WorkflowExecution, type WorkflowVersion } from '@/api/workflow';
 import { getErrorMessage } from '@/api/client';
 import { formatDateTime, timeAgo } from '@/utils/format';
+import { REVIEW_STATUS_MAP } from '@/utils/constants';
 
 const WF_STATUS_MAP: Record<string, { label: string; color: string }> = {
   draft: { label: '草稿', color: 'default' },
@@ -176,6 +177,12 @@ export function WorkflowDetailPage() {
             <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate('/workflows')} />
             <span>{workflow.name}</span>
             <Tag color={meta?.color}>{meta?.label}</Tag>
+            <Tag
+              color={REVIEW_STATUS_MAP[workflow.review_status]?.color ?? 'default'}
+              title={workflow.review_comment || undefined}
+            >
+              {REVIEW_STATUS_MAP[workflow.review_status]?.label ?? workflow.review_status}
+            </Tag>
             <span style={{ color: 'var(--color-text-secondary)', fontWeight: 400 }}>
               v{workflow.version} · {workflow.definition?.nodes?.length ?? 0} 节点
             </span>
@@ -186,13 +193,15 @@ export function WorkflowDetailPage() {
             <Button icon={<EditOutlined />} onClick={() => navigate(`/workflows/${id}/edit`)}>
               编排
             </Button>
-            <Button
-              icon={<PlayCircleOutlined />}
-              onClick={() => setTriggerOpen(true)}
-              disabled={workflow.status !== 'active'}
-            >
-              触发
-            </Button>
+            <Tooltip title={workflow.review_status !== 'approved' ? '审核中/已驳回, 暂不可运行 (手工/定时/Webhook 均拦截)' : ''}>
+              <Button
+                icon={<PlayCircleOutlined />}
+                onClick={() => setTriggerOpen(true)}
+                disabled={workflow.status !== 'active' || workflow.review_status !== 'approved'}
+              >
+                触发
+              </Button>
+            </Tooltip>
             {workflow.status !== 'active' && (
               <Button type="primary" icon={<CloudDownloadOutlined />} onClick={onActivate}>
                 {workflow.status === 'archived' ? '重新激活' : '激活'}
@@ -247,6 +256,24 @@ export function WorkflowDetailPage() {
         </Row>
       </Card>
 
+      {workflow.review_status === 'pending' && (
+        <Alert
+          type="warning"
+          showIcon
+          message="工作流审核中"
+          description="新建/修改后需管理员审核通过，审核中禁止运行（手工触发/定时调度/Webhook 调用均拦截）；若引用了审核中的 Agent 同样无法运行。"
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {workflow.review_status === 'rejected' && (
+        <Alert
+          type="error"
+          showIcon
+          message="工作流审核已驳回"
+          description={workflow.review_comment || '请修改后重新保存，将再次进入审核。'}
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Tabs
         items={[
           {

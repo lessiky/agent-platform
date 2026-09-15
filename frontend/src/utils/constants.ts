@@ -24,6 +24,13 @@ export const LOG_LEVEL_MAP: Record<LogLevel, { label: string; color: string }> =
   warn: { label: 'WARN', color: 'gold' },
   error: { label: 'ERROR', color: 'red' },
 };
+// 审核状态展示 (Agent/工作流发布审核: 新建/修改 -> 待审核, 管理员审核)
+export const REVIEW_STATUS_MAP: Record<string, { label: string; color: string }> = {
+  pending: { label: '审核中', color: 'orange' },
+  approved: { label: '审核通过', color: 'green' },
+  rejected: { label: '已驳回', color: 'red' },
+};
+
 // 审核请求状态展示 (M4.5)
 export const APPROVAL_STATUS_MAP: Record<ApprovalStatus, { label: string; color: string }> = {
   pending: { label: '待审核', color: 'orange' },

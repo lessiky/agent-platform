@@ -470,7 +470,10 @@ function EditorInner() {
       if (!saved) { message.error('保存失败'); return; }
       setWorkflow(saved);
       setNodes(currentNodes);
-      message.success(activateAfter ? '已保存并激活' : `已保存 (v${saved.version})`);
+      message.success({
+        content: (activateAfter ? '已保存并激活' : `已保存 (v${saved.version})`) + '；工作流已进入审核中状态，审核通过前不可运行',
+        duration: 4,
+      });
       if (activateAfter && saved.status !== 'active') {
         const act = await workflowApi.activate(workflow.id);
         setWorkflow(act.data ?? null);

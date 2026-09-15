@@ -14,6 +14,13 @@ const (
 	WorkflowStatusArchived = "archived" // 已归档
 )
 
+// 工作流审核状态 (与生命周期状态正交, 控制运行资格)
+const (
+	WorkflowReviewPending  = "pending"  // 审核中 (新建/修改后自动进入)
+	WorkflowReviewApproved = "approved" // 审核通过
+	WorkflowReviewRejected = "rejected" // 已驳回
+)
+
 // 触发类型
 const (
 	WorkflowTriggerManual  = "manual"  // 手动触发
@@ -53,11 +60,16 @@ const (
 
 // Workflow 工作流定义 (PRD 5.5)
 type Workflow struct {
-	ID              string         `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
-	Name            string         `gorm:"type:varchar(64);not null" json:"name"`
-	Description     string         `gorm:"type:text" json:"description"`
-	Definition      datatypes.JSON `gorm:"type:jsonb;not null" json:"definition"` // DAG 定义 {version,nodes,edges}
-	Status          string         `gorm:"type:varchar(16);not null;default:'draft';index" json:"status"`
+	ID          string         `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	Name        string         `gorm:"type:varchar(64);not null" json:"name"`
+	Description string         `gorm:"type:text" json:"description"`
+	Definition  datatypes.JSON `gorm:"type:jsonb;not null" json:"definition"` // DAG 定义 {version,nodes,edges}
+	Status      string         `gorm:"type:varchar(16);not null;default:'draft';index" json:"status"`
+	// 审核状态: 仅 approved 允许运行 (手工/定时/Webhook)
+	ReviewStatus    string         `gorm:"type:varchar(16);not null;default:'approved';index" json:"review_status"`
+	ReviewedBy      *string        `gorm:"type:uuid" json:"reviewed_by"`
+	ReviewedAt      *time.Time     `json:"reviewed_at"`
+	ReviewComment   *string        `gorm:"type:text" json:"review_comment"` // 审核意见 / 驳回原因
 	InputSchema     datatypes.JSON `gorm:"type:jsonb" json:"input_schema"`
 	OutputSchema    datatypes.JSON `gorm:"type:jsonb" json:"output_schema"`
 	Version         int            `gorm:"not null;default:1" json:"version"`

@@ -125,6 +125,7 @@ type workflowService struct {
 	versions   repository.WorkflowVersionRepository
 	executions repository.WorkflowExecutionRepository
 	nodes      repository.WorkflowNodeExecutionRepository
+	agents     repository.AgentRepository // 运行前预检 agent 审核状态
 	engine     *WorkflowEngine
 	scheduler  WorkflowSchedulerRefresher
 }
@@ -139,6 +140,7 @@ func NewWorkflowService(
 	versions repository.WorkflowVersionRepository,
 	executions repository.WorkflowExecutionRepository,
 	nodes repository.WorkflowNodeExecutionRepository,
+	agents repository.AgentRepository,
 	engine *WorkflowEngine,
 ) WorkflowService {
 	return &workflowService{
@@ -146,6 +148,7 @@ func NewWorkflowService(
 		versions:   versions,
 		executions: executions,
 		nodes:      nodes,
+		agents:     agents,
 		engine:     engine,
 	}
 }
@@ -170,10 +173,12 @@ func (s *workflowService) Create(ctx context.Context, req CreateWorkflowRequest,
 	_ = def
 
 	workflow := &model.Workflow{
-		Name:         req.Name,
-		Description:  req.Description,
-		Definition:   req.Definition,
-		Status:       model.WorkflowStatusDraft,
+		Name:        req.Name,
+		Description: req.Description,
+		Definition:  req.Definition,
+		Status:      model.WorkflowStatusDraft,
+		// 新建 -> 审核中, 管理员审核通过前禁止运行
+		ReviewStatus: model.WorkflowReviewPending,
 		InputSchema:  req.InputSchema,
 		OutputSchema: req.OutputSchema,
 		Version:      1,
@@ -248,6 +253,11 @@ func (s *workflowService) Update(ctx context.Context, id string, req UpdateWorkf
 		return workflow, nil
 	}
 	workflow.Version++
+	// 内容修改 -> 回到审核中 (清空上次审核信息)
+	workflow.ReviewStatus = model.WorkflowReviewPending
+	workflow.ReviewedBy = nil
+	workflow.ReviewedAt = nil
+	workflow.ReviewComment = nil
 	if err := s.workflows.Update(ctx, workflow); err != nil {
 		return nil, errors.Wrap(err, "failed to update workflow")
 	}
@@ -360,6 +370,11 @@ func (s *workflowService) UpdateSchedule(ctx context.Context, id string, req Upd
 	if err := applySchedule(workflow, schedule); err != nil {
 		return nil, err
 	}
+	// 调度配置变更 -> 回到审核中 (清空上次审核信息)
+	workflow.ReviewStatus = model.WorkflowReviewPending
+	workflow.ReviewedBy = nil
+	workflow.ReviewedAt = nil
+	workflow.ReviewComment = nil
 	if err := s.workflows.Update(ctx, workflow); err != nil {
 		return nil, errors.Wrap(err, "failed to update schedule")
 	}
@@ -376,8 +391,19 @@ func (s *workflowService) Trigger(ctx context.Context, id string, input map[stri
 	if workflow.Status != model.WorkflowStatusActive {
 		return nil, errors.NewValidationError("工作流未激活 (当前状态: " + workflow.Status + "), 无法触发")
 	}
+	// 审核门 1: 工作流自身审核中/已驳回 -> 禁止运行 (手工/定时/Webhook 统一在此拦截)
+	switch workflow.ReviewStatus {
+	case model.WorkflowReviewPending:
+		return nil, errors.NewValidationError("工作流审核中, 禁止运行 (手工/定时/Webhook 调用均拦截)")
+	case model.WorkflowReviewRejected:
+		return nil, errors.NewValidationError("工作流审核已驳回, 禁止运行; 请修改后重新提交审核")
+	}
 	def, err := ParseDefinition(workflow.Definition)
 	if err != nil {
+		return nil, err
+	}
+	// 审核门 2: 预检引用的 agent, 任一 agent 审核中/已驳回 -> 报错
+	if err := s.checkAgentsUsable(ctx, def); err != nil {
 		return nil, err
 	}
 	if input == nil {
@@ -543,6 +569,47 @@ func (s *workflowService) ListVersions(ctx context.Context, workflowID string) (
 }
 
 // ---------- helpers ----------
+
+// checkAgentsUsable 工作流运行前预检: DAG 中所有 agent 节点引用的 Agent 必须审核通过
+// (需求: 工作流中有 agent 处于审核中状态时, 运行前提示报错)
+func (s *workflowService) checkAgentsUsable(ctx context.Context, def *WorkflowDefinition) error {
+	seen := make(map[string]bool)
+	ids := make([]string, 0)
+	for i := range def.Nodes {
+		node := &def.Nodes[i]
+		if node.Type != model.NodeTypeAgent {
+			continue
+		}
+		agentID, _ := node.Config["agent_id"].(string)
+		if agentID == "" || seen[agentID] {
+			continue
+		}
+		seen[agentID] = true
+		ids = append(ids, agentID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	agents, err := s.agents.ListByIDs(ctx, ids)
+	if err != nil {
+		return errors.Wrap(err, "failed to check agents referenced by workflow")
+	}
+	blocked := make([]string, 0)
+	for _, a := range agents {
+		if a.ReviewStatus == model.AgentReviewApproved {
+			continue
+		}
+		if a.ReviewStatus == model.AgentReviewRejected {
+			blocked = append(blocked, a.Name+" (审核已驳回)")
+		} else {
+			blocked = append(blocked, a.Name+" (审核中)")
+		}
+	}
+	if len(blocked) > 0 {
+		return errors.NewValidationError("工作流包含未审核通过的 Agent: " + strings.Join(blocked, ", ") + ", 禁止运行")
+	}
+	return nil
+}
 
 func (s *workflowService) reloadSchedules(ctx context.Context) {
 	if s.scheduler != nil {

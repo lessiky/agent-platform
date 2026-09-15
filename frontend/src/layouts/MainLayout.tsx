@@ -85,6 +85,10 @@ export function MainLayout() {
     if (permissions.includes('kb:read')) {
       items.push({ key: '/kb', icon: <BookOutlined />, label: '知识库' });
     }
+    // 发布审核: Agent/工作流 审核队列 (agent:review 或 workflow:review)
+    if (permissions.includes('agent:review') || permissions.includes('workflow:review')) {
+      items.push({ key: '/reviews', icon: <SafetyCertificateOutlined />, label: '发布审核' });
+    }
     // 系统管理: 按权限显示 (user:manage / role:manage)
     const systemItems: NonNullable<MenuProps['items']> = [];
     if (permissions.includes('platform:manage')) {
@@ -109,7 +113,9 @@ export function MainLayout() {
         ? '/mcp'
         : location.pathname.startsWith('/approvals')
           ? '/approvals'
-          : location.pathname.startsWith('/models')
+          : location.pathname.startsWith('/reviews')
+            ? '/reviews'
+            : location.pathname.startsWith('/models')
             ? '/models'
             : location.pathname.startsWith('/skills')
               ? '/skills'

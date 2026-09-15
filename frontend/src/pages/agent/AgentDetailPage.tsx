@@ -26,6 +26,7 @@ import { getErrorMessage } from '@/api/client';
 import { AgentStatusTag, InstanceStatusTag, MCPStatusTag } from '@/components/common/StatusTag';
 import type { Agent, AgentBoundMCP, AgentInstance } from '@/types';
 import { formatDateTime, timeAgo } from '@/utils/format';
+import { REVIEW_STATUS_MAP } from '@/utils/constants';
 import { AgentLogsPanel } from './AgentLogsPanel';
 import { ChatPanel } from './ChatPanel';
 import { VersionsPanel } from './VersionsPanel';
@@ -123,6 +124,12 @@ export function AgentDetailPage() {
           </Button>
           <span style={{ fontSize: 18, fontWeight: 600 }}>{agent.name}</span>
           <AgentStatusTag status={agent.status} />
+          <Tag
+            color={REVIEW_STATUS_MAP[agent.review_status]?.color ?? 'default'}
+            title={agent.review_comment || undefined}
+          >
+            {REVIEW_STATUS_MAP[agent.review_status]?.label ?? agent.review_status}
+          </Tag>
           <Tag>v{agent.version}</Tag>
         </Space>
         <Space>
@@ -156,6 +163,25 @@ export function AgentDetailPage() {
           showIcon
           message="实例处于异常状态"
           description="通常为服务重启导致实例状态丢失，可重新启动实例。"
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {agent.review_status === 'pending' && (
+        <Alert
+          type="warning"
+          showIcon
+          message="Agent 审核中"
+          description="新建/修改后需管理员审核通过，审核中禁止发起会话、外部接口调用与被工作流调用。"
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {agent.review_status === 'rejected' && (
+        <Alert
+          type="error"
+          showIcon
+          message="Agent 审核已驳回"
+          description={agent.review_comment || '请修改后重新保存，将再次进入审核。'}
           style={{ marginBottom: 16 }}
         />
       )}
@@ -229,7 +255,7 @@ export function AgentDetailPage() {
           {
             key: 'chat',
             label: '对话',
-            children: <ChatPanel agentId={agent.id} />,
+            children: <ChatPanel agentId={agent.id} reviewStatus={agent.review_status} />,
           },
           {
             key: 'versions',

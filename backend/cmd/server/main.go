@@ -20,6 +20,7 @@ import (
 	"agent-platform/internal/api/overview"
 	"agent-platform/internal/api/platform"
 	"agent-platform/internal/api/rbac"
+	"agent-platform/internal/api/review"
 	"agent-platform/internal/api/skill"
 	"agent-platform/internal/api/workflow"
 	"agent-platform/internal/config"
@@ -307,6 +308,7 @@ func main() {
 		repository.NewWorkflowVersionRepository(),
 		repository.NewWorkflowExecutionRepository(),
 		repository.NewWorkflowNodeExecutionRepository(),
+		repository.NewAgentRepository(),
 		workflowEngine,
 	)
 	workflowScheduler := service.NewWorkflowScheduler(workflowService, repository.NewWorkflowRepository())
@@ -337,6 +339,12 @@ func main() {
 	// M5 Phase 2: AI 自动生成工作流 (复用模型路由 + Agent/MCP 目录)
 	workflowAIGenerator := service.NewWorkflowAIGenerator(modelService, repository.NewAgentRepository(), repository.NewMCPServerRepository())
 	workflowHandler := workflow.NewHandler(workflowService, workflowAIGenerator)
+	// 审核域 (M-review): Agent/工作流 新建/修改 -> 审核中, 仅管理员可审核通过/驳回
+	reviewHandler := review.NewHandler(service.NewReviewService(
+		repository.NewAgentRepository(),
+		repository.NewWorkflowRepository(),
+		repository.NewAuditLogRepository(),
+	))
 	skillHandler := skill.NewHandler(skillService)
 	kbHandler := kb.NewHandler(kbService, kbTaskSvc)
 	overviewHandler := overview.NewHandler(service.NewOverviewService(repository.NewOverviewRepository()))
@@ -372,7 +380,7 @@ func main() {
 		repository.NewAuditLogRepository(),
 	)
 	rbacHandler := rbac.NewHandler(rbacService)
-	router := setupRouter(cfg, agent.NewHandler(agentService, chatService, memService, kbSummarizer), mcp.NewHandler(mcpService, approvalService), model.NewHandler(modelService), approvalHandler, workflowHandler, skillHandler, kbHandler, rbacHandler, overviewHandler, platformHandler)
+	router := setupRouter(cfg, agent.NewHandler(agentService, chatService, memService, kbSummarizer), mcp.NewHandler(mcpService, approvalService), model.NewHandler(modelService), approvalHandler, workflowHandler, reviewHandler, skillHandler, kbHandler, rbacHandler, overviewHandler, platformHandler)
 
 	// 7. 启动服务 (支持优雅退出)
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
@@ -407,7 +415,7 @@ func main() {
 	logger.Close()
 }
 
-func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mcp.Handler, modelHandler *model.Handler, approvalHandler *mcp.ApprovalHandler, workflowHandler *workflow.Handler, skillHandler *skill.Handler, kbHandler *kb.Handler, rbacHandler *rbac.Handler, overviewHandler *overview.Handler, platformHandler *platform.Handler) *gin.Engine {
+func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mcp.Handler, modelHandler *model.Handler, approvalHandler *mcp.ApprovalHandler, workflowHandler *workflow.Handler, reviewHandler *review.Handler, skillHandler *skill.Handler, kbHandler *kb.Handler, rbacHandler *rbac.Handler, overviewHandler *overview.Handler, platformHandler *platform.Handler) *gin.Engine {
 	// 设置模式
 	gin.SetMode(cfg.Server.Mode)
 
@@ -431,6 +439,7 @@ func setupRouter(cfg *config.Config, agentHandler *agent.Handler, mcpHandler *mc
 	modelHandler.RegisterRoutes(api)
 	approvalHandler.RegisterRoutes(api)
 	workflowHandler.RegisterRoutes(api)
+	reviewHandler.RegisterRoutes(api)
 	skillHandler.RegisterRoutes(api)
 	kbHandler.RegisterRoutes(api)
 	rbacHandler.RegisterRoutes(api)

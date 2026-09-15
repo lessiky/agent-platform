@@ -44,3 +44,36 @@ export function RequirePermission({ code, children }: { code: string; children: 
   }
   return <>{children}</>;
 }
+
+// 任一权限守卫: 持有任一权限码即可访问 (审核中心: agent:review / workflow:review)
+export function RequireAnyPermission({ codes, children }: { codes: string[]; children: ReactNode }) {
+  const { meLoaded, permissions, fetchMe } = useAuthStore();
+
+  useEffect(() => {
+    fetchMe();
+  }, [fetchMe]);
+
+  if (meLoaded && !codes.some((code) => permissions.includes(code))) {
+    return (
+      <Result
+        status="403"
+        title="403"
+        subTitle="权限不足, 请联系管理员分配相应角色"
+        extra={
+          <a onClick={() => window.history.back()}>
+            返回
+          </a>
+        }
+      />
+    );
+  }
+
+  if (!meLoaded) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}>
+        <Spin size="large" />
+      </div>
+    );
+  }
+  return <>{children}</>;
+}

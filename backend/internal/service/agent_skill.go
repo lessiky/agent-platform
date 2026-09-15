@@ -206,5 +206,13 @@ func (s *agentService) UpdateAgentSkills(ctx context.Context, agentID string, sk
 	if err := s.validateSkills(ctx, mcpIDs, cfg.Tools, skillIDs, cfg.SkillsUsageMode); err != nil {
 		return err
 	}
-	return s.syncSkillBindings(ctx, agentID, skillIDs, operatorID)
+	if err := s.syncSkillBindings(ctx, agentID, skillIDs, operatorID); err != nil {
+		return err
+	}
+	// 技能绑定变更 -> 回到审核中 (清空上次审核信息)
+	agent.ReviewStatus = model.AgentReviewPending
+	agent.ReviewedBy = nil
+	agent.ReviewedAt = nil
+	agent.ReviewComment = nil
+	return s.agents.Update(ctx, agent)
 }
