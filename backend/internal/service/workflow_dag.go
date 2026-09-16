@@ -74,6 +74,16 @@ func ParseDefinition(raw datatypes.JSON) (*WorkflowDefinition, error) {
 	return &def, nil
 }
 
+// marshalDefinition 将解析后的 DAG 序列化回标准 JSON 对象字节,
+// 避免把双重编码的 JSON 字符串写入 jsonb (历史字符串形态数据在保存时一并归一化)
+func marshalDefinition(def *WorkflowDefinition) (datatypes.JSON, error) {
+	raw, err := json.Marshal(def)
+	if err != nil {
+		return nil, errors.Wrap(err, "DAG 定义序列化失败")
+	}
+	return datatypes.JSON(raw), nil
+}
+
 // ValidateDefinition 校验 DAG: 节点/边合法性 + 拓扑无环
 func ValidateDefinition(def *WorkflowDefinition) error {
 	if len(def.Nodes) == 0 {

@@ -72,3 +72,163 @@ body {
 .session-rename-btn:hover {
   color: #1677ff;
 }
+
+/* ===== Markdown 预览 (知识库条目正文等) ===== */
+.md-preview {
+  font-size: 14px;
+  line-height: 1.75;
+  word-break: break-word;
+}
+.md-preview > *:first-child {
+  margin-top: 0;
+}
+.md-preview > *:last-child {
+  margin-bottom: 0;
+}
+.md-preview h1,
+.md-preview h2,
+.md-preview h3,
+.md-preview h4,
+.md-preview h5,
+.md-preview h6 {
+  margin: 18px 0 10px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.md-preview h1 {
+  font-size: 22px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+.md-preview h2 {
+  font-size: 18px;
+}
+.md-preview h3 {
+  font-size: 16px;
+}
+.md-preview h4 {
+  font-size: 14px;
+}
+.md-preview p {
+  margin: 8px 0;
+}
+.md-preview ul,
+.md-preview ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+.md-preview li {
+  margin: 4px 0;
+}
+.md-preview blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid #d9d9d9;
+  background: rgba(0, 0, 0, 0.03);
+  color: var(--color-text-secondary);
+}
+.md-preview a {
+  color: var(--color-primary);
+}
+.md-preview hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 16px 0;
+}
+.md-preview img {
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+}
+.md-preview table {
+  border-collapse: collapse;
+  margin: 12px 0;
+  width: 100%;
+  font-size: 13px;
+}
+.md-preview th,
+.md-preview td {
+  border: 1px solid var(--color-border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.md-preview th {
+  background: rgba(0, 0, 0, 0.04);
+  font-weight: 600;
+}
+.md-preview code {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12.5px;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.md-preview pre.md-code-block {
+  margin: 12px 0;
+  padding: 12px;
+  background: #1f1f23;
+  color: #d4d4d4;
+  border-radius: var(--radius-md);
+  overflow: auto;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.md-preview pre.md-code-block code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.md-preview .katex-display {
+  margin: 10px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* ===== Markdown 聊天紧凑变体 (Agent 对话回复) ===== */
+.md-preview.md-chat {
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+.md-preview.md-chat h1,
+.md-preview.md-chat h2,
+.md-preview.md-chat h3,
+.md-preview.md-chat h4,
+.md-preview.md-chat h5,
+.md-preview.md-chat h6 {
+  margin: 10px 0 6px;
+}
+.md-preview.md-chat h1 {
+  font-size: 17px;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+.md-preview.md-chat h2 {
+  font-size: 15.5px;
+}
+.md-preview.md-chat h3 {
+  font-size: 14.5px;
+}
+.md-preview.md-chat p {
+  margin: 6px 0;
+}
+.md-preview.md-chat ul,
+.md-preview.md-chat ol {
+  margin: 6px 0;
+}
+.md-preview.md-chat blockquote {
+  margin: 6px 0;
+}
+.md-preview.md-chat table {
+  margin: 8px 0;
+}
+.md-preview.md-chat hr {
+  margin: 10px 0;
+}
+.md-preview.md-chat pre.md-code-block {
+  margin: 8px 0;
+  padding: 10px;
+}
+.md-preview.md-chat .katex-display {
+  margin: 8px 0;
+}

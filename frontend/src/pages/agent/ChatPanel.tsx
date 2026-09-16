@@ -17,6 +17,7 @@ import type {
 import { useHasPermission } from '@/store/auth-store';
 import { timeAgo } from '@/utils/format';
 import { MathText } from '@/components/common/MathText';
+import { Markdown } from '@/components/common/Markdown';
 
 // M2.5.7 Agent 对话面板: 会话列表 + 消息气泡 + 输入框 (执行元数据内嵌, 待审批入口)
 // 技能加载状态 (M9) -> 徽标颜色 / 文案
@@ -757,7 +758,15 @@ function MessageBubble({
           wordBreak: 'break-word',
         }}
       >
-        {msg.content ? <MathText text={msg.content} /> : <span style={{ opacity: 0.65 }}>(无应答内容)</span>}
+        {msg.content ? (
+          isUser ? (
+            <MathText text={msg.content} />
+          ) : (
+            <Markdown content={msg.content} className="md-chat" />
+          )
+        ) : (
+          <span style={{ opacity: 0.65 }}>(无应答内容)</span>
+        )}
         {showThinking && thinking && (
           <details style={{ marginTop: 6 }}>
             <summary style={{ cursor: 'pointer', fontSize: 12, color: '#8c8c8c', userSelect: 'none', opacity: 0.9 }}>

@@ -129,12 +129,48 @@ export interface DashboardData {
   recent: WorkflowExecution[];
 }
 
+// 历史数据中 definition 可能被以双重编码的 JSON 字符串存入 jsonb (e2e/脚本误传),
+// 返回页面前统一归一化为对象, 避免页面读取 nodes/edges 时崩溃
+function asDefinition(def: WorkflowDefinition | string | null | undefined): WorkflowDefinition | null {
+  if (!def) return null;
+  if (typeof def !== 'string') return def;
+  try {
+    let parsed: unknown = JSON.parse(def);
+    if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+    return parsed as WorkflowDefinition;
+  } catch {
+    return null;
+  }
+}
+
+function fixDefinition(d: { definition?: unknown }) {
+  if (typeof d.definition === 'string') {
+    d.definition = asDefinition(d.definition);
+  }
+}
+
+function fixEnvelope<T>(p: Promise<ApiEnvelope<T>>): Promise<ApiEnvelope<T>> {
+  return p.then((res) => {
+    if (res?.data) fixDefinition(res.data as { definition?: unknown });
+    return res;
+  });
+}
+
+function fixItems<T extends { definition?: unknown }, D extends { items: T[] }>(
+  p: Promise<ApiEnvelope<D>>
+): Promise<ApiEnvelope<D>> {
+  return p.then((res) => {
+    (res?.data?.items ?? []).forEach(fixDefinition);
+    return res;
+  });
+}
+
 // ---------- API ----------
 
 export const workflowApi = {
   list: (params?: { page?: number; size?: number; status?: string }) =>
-    apiClient.get<ApiEnvelope<{ items: Workflow[]; total: number }>>('/workflows', { params }),
-  get: (id: string) => apiClient.get<ApiEnvelope<Workflow>>(`/workflows/${id}`),
+    fixItems(apiClient.get<ApiEnvelope<{ items: Workflow[]; total: number }>>('/workflows', { params })),
+  get: (id: string) => fixEnvelope(apiClient.get<ApiEnvelope<Workflow>>(`/workflows/${id}`)),
   create: (data: {
     name: string;
     description?: string;
@@ -158,7 +194,8 @@ export const workflowApi = {
     apiClient.put<ApiEnvelope<Workflow>>(`/workflows/${id}/schedule`, data),
   trigger: (id: string, input?: Record<string, unknown>) =>
     apiClient.post<ApiEnvelope<WorkflowExecution>>(`/workflows/${id}/trigger`, { input: input ?? {} }),
-  versions: (id: string) => apiClient.get<ApiEnvelope<{ items: WorkflowVersion[] }>>(`/workflows/${id}/versions`),
+  versions: (id: string) =>
+    fixItems(apiClient.get<ApiEnvelope<{ items: WorkflowVersion[] }>>(`/workflows/${id}/versions`)),
   executions: (workflowId: string, params?: { page?: number; size?: number; status?: string }) =>
     apiClient.get<ApiEnvelope<{ items: WorkflowExecution[]; total: number }>>(`/workflows/${workflowId}/executions`, { params }),
   getExecution: (id: string) => apiClient.get<ApiEnvelope<ExecutionDetail>>(`/workflow-executions/${id}`),

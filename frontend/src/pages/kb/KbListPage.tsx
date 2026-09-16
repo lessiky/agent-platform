@@ -10,6 +10,7 @@ import {
   Modal,
   Popconfirm,
   Select,
+  Segmented,
   Space,
   Spin,
   Table,
@@ -33,6 +34,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import { kbApi } from '@/api/kb';
 import { getErrorMessage } from '@/api/client';
+import { Markdown } from '@/components/common/Markdown';
 import { useAuthStore } from '@/store/auth-store';
 import { KB_SOURCE_MAP, KB_STATUS_MAP } from '@/utils/constants';
 import { formatDateTime } from '@/utils/format';
@@ -87,6 +89,8 @@ export function KbListPage() {
   const [viewDoc, setViewDoc] = useState<KBDocument | null>(null);
   // M11.5 事项 4: 条目分块预览 (详情抽屉「分块」页签; null = 未加载)
   const [docChunks, setDocChunks] = useState<KBChunkView[] | null>(null);
+  // 正文查看模式: rendered = Markdown 渲染; raw = 原文
+  const [viewMode, setViewMode] = useState<'rendered' | 'raw'>('rendered');
 
   useEffect(() => {
     timerRef.current = setTimeout(() => setDebouncedKeyword(keyword.trim()), 400);
@@ -701,21 +705,51 @@ export function KbListPage() {
                   key: 'content',
                   label: '正文',
                   children: (
-                    <pre
-                      style={{
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                        background: 'var(--color-bg-light, rgba(0,0,0,0.03))',
-                        padding: 12,
-                        borderRadius: 8,
-                        fontSize: 13,
-                        lineHeight: 1.7,
-                        maxHeight: '60vh',
-                        overflow: 'auto',
-                      }}
-                    >
-                      {viewDoc.content}
-                    </pre>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      <Segmented
+                        size="small"
+                        value={viewMode}
+                        onChange={(value) => setViewMode(value as 'rendered' | 'raw')}
+                        options={[
+                          { label: '渲染', value: 'rendered' },
+                          { label: '原文', value: 'raw' },
+                        ]}
+                      />
+                      {viewMode === 'rendered' ? (
+                        viewDoc.content.trim() ? (
+                          <div
+                            style={{
+                              background: 'var(--color-bg-light, rgba(0,0,0,0.03))',
+                              padding: 12,
+                              borderRadius: 8,
+                              maxHeight: '60vh',
+                              overflow: 'auto',
+                            }}
+                          >
+                            <Markdown content={viewDoc.content} />
+                          </div>
+                        ) : (
+                          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无正文" />
+                        )
+                      ) : (
+                        <pre
+                          style={{
+                            margin: 0,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            background: 'var(--color-bg-light, rgba(0,0,0,0.03))',
+                            padding: 12,
+                            borderRadius: 8,
+                            fontSize: 13,
+                            lineHeight: 1.7,
+                            maxHeight: '60vh',
+                            overflow: 'auto',
+                          }}
+                        >
+                          {viewDoc.content}
+                        </pre>
+                      )}
+                    </div>
                   ),
                 },
                 {

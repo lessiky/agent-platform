@@ -306,7 +306,7 @@ export function WorkflowDetailPage() {
                       <strong>v{v.version}</strong>
                       {v.version === workflow.version && <Tag color="green" style={{ marginLeft: 8 }}>当前</Tag>}
                       <div style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
-                        {formatDateTime(v.created_at)} · {v.definition.nodes.length} 节点 / {v.definition.edges.length} 边
+                        {formatDateTime(v.created_at)} · {v.definition?.nodes?.length ?? 0} 节点 / {v.definition?.edges?.length ?? 0} 边
                       </div>
                     </div>
                   ),

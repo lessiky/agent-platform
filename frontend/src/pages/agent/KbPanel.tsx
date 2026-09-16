@@ -5,6 +5,7 @@ import { SearchOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import { agentApi } from '@/api/agent';
 import { getErrorMessage } from '@/api/client';
+import { MarkdownExcerpt } from '@/components/common/MarkdownExcerpt';
 import { KB_SEARCH_MODE_MAP } from '@/utils/constants';
 import type { AgentKBCategoryView, AgentKBView, KBSearchHit, KBSearchMode } from '@/types';
 
@@ -153,13 +154,9 @@ export function KbPanel({ agentId }: { agentId: string }) {
                       <Tag>{h.category_name}</Tag>
                       <Typography.Text type="secondary">相关度 {h.score.toFixed(2)}</Typography.Text>
                     </Space>
-                    <Typography.Paragraph
-                      type="secondary"
-                      ellipsis={{ rows: 3, expandable: true }}
-                      style={{ marginBottom: 0 }}
-                    >
-                      {h.excerpt}
-                    </Typography.Paragraph>
+                    <div style={{ color: 'rgba(0, 0, 0, 0.45)' }}>
+                      <MarkdownExcerpt text={h.excerpt} />
+                    </div>
                     {h.matched_chunk && (
                       <div>
                         <Tag color="blue" style={{ marginBottom: 4 }}>

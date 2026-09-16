@@ -170,12 +170,15 @@ func (s *workflowService) Create(ctx context.Context, req CreateWorkflowRequest,
 	if err != nil {
 		return nil, err
 	}
-	_ = def
+	normalized, err := marshalDefinition(def)
+	if err != nil {
+		return nil, err
+	}
 
 	workflow := &model.Workflow{
 		Name:        req.Name,
 		Description: req.Description,
-		Definition:  req.Definition,
+		Definition:  normalized,
 		Status:      model.WorkflowStatusDraft,
 		// 新建 -> 审核中, 管理员审核通过前禁止运行
 		ReviewStatus: model.WorkflowReviewPending,
@@ -234,12 +237,19 @@ func (s *workflowService) Update(ctx context.Context, id string, req UpdateWorkf
 		workflow.Description = *req.Description
 		changed = true
 	}
-	if req.Definition != nil && string(*req.Definition) != string(workflow.Definition) {
-		if _, err := ParseDefinition(*req.Definition); err != nil {
+	if req.Definition != nil {
+		parsed, err := ParseDefinition(*req.Definition)
+		if err != nil {
 			return nil, err
 		}
-		workflow.Definition = *req.Definition
-		changed = true
+		normalized, err := marshalDefinition(parsed)
+		if err != nil {
+			return nil, err
+		}
+		if string(normalized) != string(workflow.Definition) {
+			workflow.Definition = normalized
+			changed = true
+		}
 	}
 	if req.InputSchema != nil && string(*req.InputSchema) != string(workflow.InputSchema) {
 		workflow.InputSchema = *req.InputSchema
