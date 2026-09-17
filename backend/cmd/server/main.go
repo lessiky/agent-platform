@@ -133,8 +133,10 @@ func main() {
 		cfg.Model.CheckTimeout,
 		cfg.Model.ChatTimeout,
 		cfg.Memory.EmbedTimeout,
+		// embedSource = 记忆语义检索向量模型; rerankSource = 知识库重排模型 (两者勿混接:
+		// is_rerank_model 标记 / SayHi 分发 / 对话路由排除均依赖该来源)
 		embedModelSource,
-		kbEmbedSource,
+		kbRerankSource,
 	)
 	// 运行时模拟流量中, Agent 调用按优先级路由到模型并消费配额 (6.5)
 	agentRuntime.SetModelRouter(modelService)

@@ -102,6 +102,11 @@ export function ModelListPage() {
                 <Tag color="purple" style={{ marginRight: 0 }}>向量</Tag>
               </Tooltip>
             )}
+            {record.is_rerank_model && (
+              <Tooltip title="重排专用模型 (平台设置-知识库重排), 不参与对话路由">
+                <Tag color="orange" style={{ marginRight: 0 }}>重排</Tag>
+              </Tooltip>
+            )}
           </Space>
           <div style={{ color: 'var(--color-text-secondary)', fontSize: 12 }}>
             {MODEL_PROVIDER_MAP[record.provider]?.label ?? record.provider}

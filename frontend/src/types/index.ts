@@ -430,6 +430,8 @@ export interface ModelTemplate {
   last_error: string;
   // 向量专用模板 (平台设置-记忆语义检索模型生效值, 不参与对话路由)
   is_embed_model?: boolean;
+  // 重排专用模板 (平台设置-知识库重排模型生效值, 不参与对话路由)
+  is_rerank_model?: boolean;
   created_by: string | null;
   created_at: string;
   updated_at: string;

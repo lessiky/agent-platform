@@ -400,8 +400,9 @@ func (s *modelTemplateService) Test(ctx context.Context, id string) (*ProbeView,
 }
 
 // SayHi 发送Hi消息测试: 对话模板真实调用一次对话接口, 验证模型能否正常生成回复;
-// 向量专用模板 (记忆语义检索) 真实调用一次 /embeddings, 验证模型能否正常生成向量
-// (不消费配额, 不改变模板状态)
+// 向量专用模板 (记忆语义检索) 真实调用一次 /embeddings, 验证模型能否正常生成向量;
+// 重排专用模板 (M11 知识库) 真实调用一次 /rerank, 验证模型能否正常打分
+// (均不消费配额, 不改变模板状态)
 func (s *modelTemplateService) SayHi(ctx context.Context, id string) (*HiView, error) {
 	t, err := s.templates.Get(ctx, id)
 	if err != nil {
@@ -1169,8 +1170,10 @@ func (s *modelTemplateService) sayHiRerank(ctx context.Context, t *model.ModelTe
 	if err != nil {
 		return &HiView{OK: false, Error: err.Error()}
 	}
+	query := "知识库连通性检测"
+	docs := []string{"这是用于验证 rerank 模型连通性的测试文档。"}
 	start := time.Now()
-	res, err := client.Rerank(ctx, t.Model, "知识库连通性检测", []string{"这是用于验证 rerank 模型连通性的测试文档。"})
+	res, err := client.Rerank(ctx, t.Model, query, docs)
 	latency := int(time.Since(start).Milliseconds())
 	if err != nil {
 		return &HiView{OK: false, LatencyMs: latency, Error: truncate(err.Error(), 300)}
@@ -1178,7 +1181,28 @@ func (s *modelTemplateService) sayHiRerank(ctx context.Context, t *model.ModelTe
 	if len(res.Scores) == 0 {
 		return &HiView{OK: false, LatencyMs: latency, Error: "rerank 返回分数为空"}
 	}
-	return &HiView{OK: true, LatencyMs: latency, Model: res.Model}
+	return &HiView{
+		OK:        true,
+		LatencyMs: latency,
+		Content:   formatRerankScorePreview(len(docs), res.Scores),
+		Model:     res.Model,
+	}
+}
+
+// formatRerankScorePreview 重排分数展示 (Hi 验证恒为单文档; 多文档时取前 3 个分数)
+func formatRerankScorePreview(total int, scores []float64) string {
+	if total <= 1 {
+		return fmt.Sprintf("重排 1 篇文档 (分数: %.4f)", scores[0])
+	}
+	n := len(scores)
+	if n > 3 {
+		n = 3
+	}
+	parts := make([]string, n)
+	for i := 0; i < n; i++ {
+		parts[i] = fmt.Sprintf("%.4f", scores[i])
+	}
+	return fmt.Sprintf("重排 %d 篇文档 (前 3 分数: %s)", total, strings.Join(parts, ", "))
 }
 
 // consumeUsage 配额消费 + 用量日志 (每次模型调用计次, 失败调用同样消耗)

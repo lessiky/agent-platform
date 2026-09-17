@@ -320,6 +320,81 @@ func TestSayHi_Embed_UpstreamError(t *testing.T) {
 	}
 }
 
+// TestSayHi_Rerank_OK 重排专用模板: 走 /rerank 而非 /chat/completions, 返回分数摘要
+func TestSayHi_Rerank_OK(t *testing.T) {
+	var gotPath, gotModel string
+	var gotDocs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		var payload struct {
+			Model     string   `json:"model"`
+			Query     string   `json:"query"`
+			Documents []string `json:"documents"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		gotModel = payload.Model
+		gotDocs = payload.Documents
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"model":"bge-reranker-v2-m3","results":[{"index":0,"relevance_score":0.8642}]}`)
+	}))
+	defer srv.Close()
+
+	tpl := newTestTemplate(t, mustCipher(t), "openai", "bge-reranker-v2-m3")
+	tpl.Name = "dhzq-bge-reranker"
+	tpl.Endpoint = srv.URL + "/v1"
+	s := newRerankTestService(t, tpl, "dhzq-bge-reranker")
+
+	view, err := s.SayHi(context.Background(), "m-1")
+	if err != nil {
+		t.Fatalf("SayHi: %v", err)
+	}
+	if !view.OK {
+		t.Fatalf("ok = false: %s", view.Error)
+	}
+	if gotPath != "/v1/rerank" {
+		t.Errorf("path = %s, want /v1/rerank", gotPath)
+	}
+	if gotModel != "bge-reranker-v2-m3" {
+		t.Errorf("request model = %s, want bge-reranker-v2-m3", gotModel)
+	}
+	if len(gotDocs) != 1 {
+		t.Errorf("documents = %+v, want 1 doc", gotDocs)
+	}
+	if !strings.Contains(view.Content, "0.8642") {
+		t.Errorf("content = %s, want 包含分数 0.8642", view.Content)
+	}
+	if view.Model != "bge-reranker-v2-m3" {
+		t.Errorf("model = %s, want bge-reranker-v2-m3", view.Model)
+	}
+}
+
+// TestSayHi_Rerank_UpstreamError 重排模板 /rerank 返回 404 时 ok=false 且携带错误信息
+func TestSayHi_Rerank_UpstreamError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"message":"Not Found"}}`))
+	}))
+	defer srv.Close()
+
+	tpl := newTestTemplate(t, mustCipher(t), "openai", "bge-reranker-v2-m3")
+	tpl.Name = "dhzq-bge-reranker"
+	tpl.Endpoint = srv.URL + "/v1"
+	s := newRerankTestService(t, tpl, "dhzq-bge-reranker")
+
+	view, err := s.SayHi(context.Background(), "m-1")
+	if err != nil {
+		t.Fatalf("SayHi: %v", err)
+	}
+	if view.OK {
+		t.Fatalf("ok = true, want false on upstream 404")
+	}
+	if !strings.Contains(view.Error, "404") {
+		t.Errorf("error = %s, want 包含 '404'", view.Error)
+	}
+}
+
 // TestGetList_EmbedFlag 模型列表/详情视图标记向量专用模板 is_embed_model (M10.3, 供模型管理识别展示)
 func TestGetList_EmbedFlag(t *testing.T) {
 	cipher := mustCipher(t)
@@ -387,6 +462,76 @@ func newEmbedTestService(t *testing.T, tpl *model.ModelTemplate, embedName strin
 		nil, nil, cipher, 0, 0, 0, StaticTemplateSource(embedName), nil,
 	).(*modelTemplateService)
 	return s, usage
+}
+
+// newRerankTestService 构造带配额/用量假仓储 + rerank 模板名的模型服务 (M11, 供 SayHi 重排路径测试)
+func newRerankTestService(t *testing.T, tpl *model.ModelTemplate, rerankName string) *modelTemplateService {
+	t.Helper()
+	cipher, err := crypto.NewAesGCM(testAesKey)
+	if err != nil {
+		t.Fatalf("NewAesGCM: %v", err)
+	}
+	byID := map[string]*model.ModelTemplate{tpl.ID: tpl}
+	byName := map[string]*model.ModelTemplate{}
+	if rerankName != "" {
+		byName[rerankName] = tpl
+	}
+	return NewModelTemplateService(
+		&fakeTemplateRepo{byID: byID, byName: byName},
+		&fakeQuotaRepo{},
+		&fakeUsageRepo{},
+		nil, nil, cipher, 0, 0, 0, nil, StaticTemplateSource(rerankName),
+	).(*modelTemplateService)
+}
+
+// TestGetList_RerankFlag 模型列表/详情视图标记重排专用模板 is_rerank_model (M11, 供模型管理识别展示)
+func TestGetList_RerankFlag(t *testing.T) {
+	cipher := mustCipher(t)
+	tpl := newTestTemplate(t, cipher, "openai", "bge-reranker-v2-m3")
+	tpl.Name = "dhzq-bge-reranker"
+	other := newTestTemplate(t, cipher, "openai", "gpt-4o")
+	other.ID = "m-2"
+	other.Name = "chat-tpl"
+	repo := &fakeTemplateRepo{
+		byID:   map[string]*model.ModelTemplate{"m-1": tpl, "m-2": other},
+		byName: map[string]*model.ModelTemplate{"dhzq-bge-reranker": tpl},
+	}
+	s := NewModelTemplateService(
+		repo, &fakeQuotaRepo{}, &fakeUsageRepo{}, nil, nil, cipher, 0, 0, 0, nil, StaticTemplateSource("dhzq-bge-reranker"),
+	).(*modelTemplateService)
+
+	got, _, err := s.Get(context.Background(), "m-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.IsRerankModel {
+		t.Errorf("Get rerank: is_rerank_model = false, want true")
+	}
+	if got.IsEmbedModel {
+		t.Errorf("Get rerank: is_embed_model = true, want false")
+	}
+	gotOther, _, err := s.Get(context.Background(), "m-2")
+	if err != nil {
+		t.Fatalf("Get chat: %v", err)
+	}
+	if gotOther.IsRerankModel || gotOther.IsEmbedModel {
+		t.Errorf("Get chat: is_rerank_model/is_embed_model = true, want both false")
+	}
+
+	items, total, err := s.List(context.Background(), repository.ModelListFilter{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("List = %d items, total=%d; want 2, 2", len(items), total)
+	}
+	flags := map[string]bool{}
+	for _, it := range items {
+		flags[it.Name] = it.IsRerankModel
+	}
+	if !flags["dhzq-bge-reranker"] || flags["chat-tpl"] {
+		t.Errorf("List is_rerank_model = %v, want only dhzq-bge-reranker", flags)
+	}
 }
 
 // TestEmbedForMemory_OK 正常路径: 向量返回 (按 index 重排) + 用量日志计次 + 路由排除 embedding 模板

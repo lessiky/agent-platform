@@ -122,12 +122,13 @@ export function ModelDetailPage() {
     if (!id) return;
     setSayingHi(true);
     const isEmbedModel = !!template?.is_embed_model;
+    const isRerankModel = !!template?.is_rerank_model;
     try {
       const res = await modelApi.sayHi(id);
       const result = res.data;
       if (result?.ok) {
         modal.success({
-          title: isEmbedModel ? '向量模型验证通过' : '模型回复正常',
+          title: isEmbedModel ? '向量模型验证通过' : isRerankModel ? '重排模型验证通过' : '模型回复正常',
           width: 560,
           content: (
             <div>
@@ -145,8 +146,14 @@ export function ModelDetailPage() {
                 {result.content || '(空回复)'}
               </pre>
               <div style={{ color: 'var(--color-text-secondary)', fontSize: 12, marginTop: 8 }}>
-                延迟 {result.latency_ms}ms · tokens {result.total_tokens ?? '-'}
-                {!isEmbedModel && (
+                延迟 {result.latency_ms}ms
+                {!isRerankModel && (
+                  <>
+                    {' · tokens '}
+                    {result.total_tokens ?? '-'}
+                  </>
+                )}
+                {!isEmbedModel && !isRerankModel && (
                   <>
                     {' · finish_reason '}
                     {result.finish_reason || '-'}
@@ -159,7 +166,7 @@ export function ModelDetailPage() {
         });
       } else {
         modal.error({
-          title: isEmbedModel ? '向量模型验证失败' : '模型回复异常',
+          title: isEmbedModel ? '向量模型验证失败' : isRerankModel ? '重排模型验证失败' : '模型回复异常',
           width: 560,
           content: <div>{result?.error || '未知错误'}</div>,
         });
@@ -239,6 +246,11 @@ export function ModelDetailPage() {
           {template?.is_embed_model && (
             <Tooltip title="向量专用模型 (平台设置-记忆语义检索), 发送Hi消息将调用 /embeddings 验证向量生成, 不参与对话路由">
               <Tag color="purple">向量模型</Tag>
+            </Tooltip>
+          )}
+          {template?.is_rerank_model && (
+            <Tooltip title="重排专用模型 (平台设置-知识库重排), 发送Hi消息将调用 /rerank 验证打分, 不参与对话路由">
+              <Tag color="orange">重排模型</Tag>
             </Tooltip>
           )}
         </Space>
